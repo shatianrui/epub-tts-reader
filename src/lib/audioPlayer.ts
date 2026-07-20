@@ -6,6 +6,10 @@ type AudioWindow = Window & {
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
+export type PreparedAudio =
+  | { kind: "decoded"; audioBuffer: AudioBuffer }
+  | { kind: "raw"; buffer: ArrayBuffer };
+
 /**
  * Mobile-friendly audio player.
  * iOS Safari blocks Audio.play() after async work unless unlocked
@@ -77,26 +81,38 @@ export class MobileAudioPlayer {
     }
   }
 
-  async playArrayBuffer(buffer: ArrayBuffer): Promise<void> {
+  /** Decode ahead of time so playback can start with almost no gap. */
+  async prepare(buffer: ArrayBuffer): Promise<PreparedAudio> {
+    if (this.ctx) {
+      if (this.ctx.state === "suspended") {
+        await this.ctx.resume();
+      }
+      const audioBuffer = await this.ctx.decodeAudioData(buffer.slice(0));
+      return { kind: "decoded", audioBuffer };
+    }
+    return { kind: "raw", buffer };
+  }
+
+  async playPrepared(prepared: PreparedAudio): Promise<void> {
     if (!this.unlocked) {
       throw new Error(
         "请先点击「继续朗读」按钮开始播放（手机浏览器需要手动触发声音）",
       );
     }
 
-    // Prefer Web Audio API — more reliable after async TTS on iOS
-    if (this.ctx) {
+    if (prepared.kind === "decoded") {
+      if (!this.ctx) {
+        throw new Error("音频上下文不可用");
+      }
       if (this.ctx.state === "suspended") {
         await this.ctx.resume();
       }
       this.stopSource();
-      const copy = buffer.slice(0);
-      const audioBuffer = await this.ctx.decodeAudioData(copy);
 
       await new Promise<void>((resolve, reject) => {
         const source = this.ctx!.createBufferSource();
         this.source = source;
-        source.buffer = audioBuffer;
+        source.buffer = prepared.audioBuffer;
         source.connect(this.ctx!.destination);
         source.onended = () => {
           if (this.source === source) this.source = null;
@@ -111,7 +127,6 @@ export class MobileAudioPlayer {
       return;
     }
 
-    // Fallback: reuse a single HTMLAudioElement
     if (!this.element) {
       this.element = new Audio();
       this.element.setAttribute("playsinline", "true");
@@ -119,7 +134,7 @@ export class MobileAudioPlayer {
 
     this.element.pause();
     this.revokeUrl();
-    const blob = new Blob([buffer], { type: "audio/mpeg" });
+    const blob = new Blob([prepared.buffer], { type: "audio/mpeg" });
     this.objectUrl = URL.createObjectURL(blob);
     this.element.src = this.objectUrl;
     this.element.load();
@@ -145,6 +160,11 @@ export class MobileAudioPlayer {
         reject(normalizePlayError(err));
       });
     });
+  }
+
+  async playArrayBuffer(buffer: ArrayBuffer): Promise<void> {
+    const prepared = await this.prepare(buffer);
+    await this.playPrepared(prepared);
   }
 
   stop(): void {

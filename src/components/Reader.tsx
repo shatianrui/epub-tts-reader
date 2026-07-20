@@ -4,7 +4,11 @@ import { useCallback, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
 import { synthesizeSpeech } from "@/lib/tts";
-import { MobileAudioPlayer, normalizePlayError } from "@/lib/audioPlayer";
+import {
+  MobileAudioPlayer,
+  normalizePlayError,
+  type PreparedAudio,
+} from "@/lib/audioPlayer";
 
 interface ReaderProps {
   book: StoredBook;
@@ -13,6 +17,30 @@ interface ReaderProps {
   onOpenSettings: () => void;
   onBack: () => void;
 }
+
+type Pos = { chapter: number; paragraph: number };
+
+function posKey(pos: Pos) {
+  return `${pos.chapter}:${pos.paragraph}`;
+}
+
+function advancePos(
+  chapters: StoredBook["chapters"],
+  pos: Pos,
+): Pos | null {
+  let { chapter: c, paragraph: p } = pos;
+  p += 1;
+  while (c < chapters.length) {
+    if (p < chapters[c].paragraphs.length) {
+      return { chapter: c, paragraph: p };
+    }
+    c += 1;
+    p = 0;
+  }
+  return null;
+}
+
+const PREFETCH_AHEAD = 2;
 
 export function Reader({
   book,
@@ -34,6 +62,7 @@ export function Reader({
 
   const playerRef = useRef<MobileAudioPlayer | null>(null);
   const playingRef = useRef(false);
+  const prefetchRef = useRef(new Map<string, Promise<PreparedAudio>>());
   const posRef = useRef({
     chapter: initialProgress?.chapterIndex ?? 0,
     paragraph: initialProgress?.paragraphIndex ?? 0,
@@ -46,6 +75,10 @@ export function Reader({
       playerRef.current = new MobileAudioPlayer();
     }
     return playerRef.current;
+  }, []);
+
+  const clearPrefetch = useCallback(() => {
+    prefetchRef.current.clear();
   }, []);
 
   const persist = useCallback(
@@ -66,7 +99,44 @@ export function Reader({
     setLoading(false);
     setStatus("已暂停");
     playerRef.current?.stop();
-  }, []);
+    clearPrefetch();
+  }, [clearPrefetch]);
+
+  const ensurePrepared = useCallback(
+    (pos: Pos, player: MobileAudioPlayer) => {
+      const key = posKey(pos);
+      const existing = prefetchRef.current.get(key);
+      if (existing) return existing;
+
+      const text = book.chapters[pos.chapter]?.paragraphs[pos.paragraph];
+      if (!text) {
+        return Promise.reject(new Error("段落不存在"));
+      }
+
+      const promise = synthesizeSpeech(text, settings)
+        .then((buffer) => player.prepare(buffer))
+        .catch((err) => {
+          prefetchRef.current.delete(key);
+          throw err;
+        });
+
+      prefetchRef.current.set(key, promise);
+      return promise;
+    },
+    [book.chapters, settings],
+  );
+
+  const prefetchAhead = useCallback(
+    (from: Pos, player: MobileAudioPlayer) => {
+      let cursor: Pos | null = from;
+      for (let i = 0; i < PREFETCH_AHEAD; i++) {
+        cursor = advancePos(book.chapters, cursor);
+        if (!cursor) break;
+        void ensurePrepared(cursor, player);
+      }
+    },
+    [book.chapters, ensurePrepared],
+  );
 
   const playFrom = useCallback(
     async (startChapter: number, startParagraph: number) => {
@@ -77,6 +147,7 @@ export function Reader({
       }
 
       const player = getPlayer();
+      clearPrefetch();
       playingRef.current = true;
       setPlaying(true);
       setError("");
@@ -85,48 +156,82 @@ export function Reader({
       posRef.current = { chapter: startChapter, paragraph: startParagraph };
       await persist(startChapter, startParagraph);
 
-      let c = startChapter;
-      let p = startParagraph;
+      let pos: Pos = { chapter: startChapter, paragraph: startParagraph };
+
+      // Kick off first + lookahead immediately
+      void ensurePrepared(pos, player);
+      prefetchAhead(pos, player);
 
       while (playingRef.current) {
-        if (c >= book.chapters.length) {
+        if (pos.chapter >= book.chapters.length) {
           setStatus("全书朗读完成");
           stop();
           return;
         }
 
-        const ch = book.chapters[c];
-        if (p >= ch.paragraphs.length) {
-          c += 1;
-          p = 0;
+        const ch = book.chapters[pos.chapter];
+        if (pos.paragraph >= ch.paragraphs.length) {
+          const next = advancePos(book.chapters, {
+            chapter: pos.chapter,
+            paragraph: pos.paragraph - 1,
+          });
+          if (!next) {
+            setStatus("全书朗读完成");
+            stop();
+            return;
+          }
+          pos = next;
           continue;
         }
 
-        const text = ch.paragraphs[p];
-        setChapterIndex(c);
-        setParagraphIndex(p);
-        posRef.current = { chapter: c, paragraph: p };
-        await persist(c, p);
+        setChapterIndex(pos.chapter);
+        setParagraphIndex(pos.paragraph);
+        posRef.current = pos;
+        await persist(pos.chapter, pos.paragraph);
 
         requestAnimationFrame(() => {
           document
-            .getElementById(`para-${c}-${p}`)
+            .getElementById(`para-${pos.chapter}-${pos.paragraph}`)
             ?.scrollIntoView({ behavior: "smooth", block: "center" });
         });
 
-        setLoading(true);
-        setStatus(`合成中 · ${ch.title} · 段 ${p + 1}/${ch.paragraphs.length}`);
+        const key = posKey(pos);
+        const pending = ensurePrepared(pos, player);
+        // Only show "合成中" if audio is not ready yet
+        let settled = false;
+        void pending.then(() => {
+          settled = true;
+        });
+        await Promise.race([
+          pending,
+          new Promise<void>((r) => setTimeout(r, 80)),
+        ]);
+        if (!settled && playingRef.current) {
+          setLoading(true);
+          setStatus(
+            `合成中 · ${ch.title} · 段 ${pos.paragraph + 1}/${ch.paragraphs.length}`,
+          );
+        }
 
         try {
-          const buffer = await synthesizeSpeech(text, settings);
+          const prepared = await pending;
           if (!playingRef.current) return;
+
+          prefetchRef.current.delete(key);
+          prefetchAhead(pos, player);
 
           setLoading(false);
           setStatus(`朗读中 · ${ch.title}`);
-          await player.playArrayBuffer(buffer);
+          await player.playPrepared(prepared);
 
           if (!playingRef.current) return;
-          p += 1;
+          const next = advancePos(book.chapters, pos);
+          if (!next) {
+            setStatus("全书朗读完成");
+            stop();
+            return;
+          }
+          pos = next;
         } catch (e) {
           setError(normalizePlayError(e).message);
           stop();
@@ -134,7 +239,17 @@ export function Reader({
         }
       }
     },
-    [book.chapters, getPlayer, onOpenSettings, persist, settings, stop],
+    [
+      book.chapters,
+      clearPrefetch,
+      ensurePrepared,
+      getPlayer,
+      onOpenSettings,
+      persist,
+      prefetchAhead,
+      settings,
+      stop,
+    ],
   );
 
   function handleToggle() {
