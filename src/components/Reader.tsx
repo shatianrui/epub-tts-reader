@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
 import { synthesizeSpeech } from "@/lib/tts";
+import { MobileAudioPlayer, normalizePlayError } from "@/lib/audioPlayer";
 
 interface ReaderProps {
   book: StoredBook;
@@ -31,8 +32,7 @@ export function Reader({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("就绪");
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
+  const playerRef = useRef<MobileAudioPlayer | null>(null);
   const playingRef = useRef(false);
   const posRef = useRef({
     chapter: initialProgress?.chapterIndex ?? 0,
@@ -40,6 +40,13 @@ export function Reader({
   });
 
   const chapter = book.chapters[chapterIndex];
+
+  const getPlayer = useCallback(() => {
+    if (!playerRef.current) {
+      playerRef.current = new MobileAudioPlayer();
+    }
+    return playerRef.current;
+  }, []);
 
   const persist = useCallback(
     async (c: number, p: number) => {
@@ -53,25 +60,13 @@ export function Reader({
     [book.id],
   );
 
-  const cleanupAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-  }, []);
-
   const stop = useCallback(() => {
     playingRef.current = false;
     setPlaying(false);
     setLoading(false);
     setStatus("已暂停");
-    cleanupAudio();
-  }, [cleanupAudio]);
+    playerRef.current?.stop();
+  }, []);
 
   const playFrom = useCallback(
     async (startChapter: number, startParagraph: number) => {
@@ -81,6 +76,7 @@ export function Reader({
         return;
       }
 
+      const player = getPlayer();
       playingRef.current = true;
       setPlaying(true);
       setError("");
@@ -112,7 +108,6 @@ export function Reader({
         posRef.current = { chapter: c, paragraph: p };
         await persist(c, p);
 
-        // Scroll into view
         requestAnimationFrame(() => {
           document
             .getElementById(`para-${c}-${p}`)
@@ -126,40 +121,30 @@ export function Reader({
           const buffer = await synthesizeSpeech(text, settings);
           if (!playingRef.current) return;
 
-          cleanupAudio();
-          const blob = new Blob([buffer], { type: "audio/mpeg" });
-          const url = URL.createObjectURL(blob);
-          objectUrlRef.current = url;
-
-          const audio = new Audio(url);
-          audioRef.current = audio;
           setLoading(false);
           setStatus(`朗读中 · ${ch.title}`);
-
-          await new Promise<void>((resolve, reject) => {
-            audio.onended = () => resolve();
-            audio.onerror = () => reject(new Error("音频播放失败"));
-            audio.play().catch(reject);
-          });
+          await player.playArrayBuffer(buffer);
 
           if (!playingRef.current) return;
           p += 1;
         } catch (e) {
-          setError(e instanceof Error ? e.message : "朗读出错");
+          setError(normalizePlayError(e).message);
           stop();
           return;
         }
       }
     },
-    [book.chapters, cleanupAudio, onOpenSettings, persist, settings, stop],
+    [book.chapters, getPlayer, onOpenSettings, persist, settings, stop],
   );
 
   function handleToggle() {
     if (playing) {
       stop();
-    } else {
-      void playFrom(posRef.current.chapter, posRef.current.paragraph);
+      return;
     }
+    // Critical for iOS: unlock audio inside the user gesture, before any await
+    getPlayer().unlock();
+    void playFrom(posRef.current.chapter, posRef.current.paragraph);
   }
 
   function handleChapterChange(next: number) {
@@ -255,9 +240,7 @@ export function Reader({
             key={`${chapter.id}-${i}`}
             id={`para-${chapterIndex}-${i}`}
             className={
-              i === paragraphIndex
-                ? "paragraph is-active"
-                : "paragraph"
+              i === paragraphIndex ? "paragraph is-active" : "paragraph"
             }
             onClick={() => handleParagraphClick(i)}
           >
