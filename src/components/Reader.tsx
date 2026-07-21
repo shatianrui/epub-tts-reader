@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
 import { synthesizeSpeech } from "@/lib/tts";
+import { useAuth } from "@/lib/auth";
+import { uploadProgress } from "@/lib/sync";
 import {
   MobileAudioPlayer,
   normalizePlayError,
@@ -51,6 +53,7 @@ export function Reader({
   onOpenSettings,
   onBack,
 }: ReaderProps) {
+  const { user } = useAuth();
   const [chapterIndex, setChapterIndex] = useState(
     initialProgress?.chapterIndex ?? 0,
   );
@@ -90,14 +93,18 @@ export function Reader({
 
   const persist = useCallback(
     async (c: number, p: number) => {
-      await saveProgress({
+      const progress = {
         bookId: book.id,
         chapterIndex: c,
         paragraphIndex: p,
         updatedAt: Date.now(),
-      });
+      };
+      await saveProgress(progress);
+      if (user) {
+        void uploadProgress(progress);
+      }
     },
-    [book.id],
+    [book.id, user],
   );
 
   const stop = useCallback(() => {

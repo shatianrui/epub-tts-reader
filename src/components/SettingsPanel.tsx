@@ -9,6 +9,8 @@ import {
 } from "@/lib/types";
 import { loadSettings, saveSettings } from "@/lib/settings";
 import { fetchVoices } from "@/lib/tts";
+import { useAuth } from "@/lib/auth";
+import { uploadSettings } from "@/lib/sync";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -17,6 +19,7 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
+  const { user } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
   const [loadingVoices, setLoadingVoices] = useState(false);
@@ -56,6 +59,9 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   function handleSave() {
     saveSettings(settings);
     onSaved?.(settings);
+    if (user) {
+      void uploadSettings(settings);
+    }
     setMessage("设置已保存");
     setTimeout(() => onClose(), 400);
   }
