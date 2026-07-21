@@ -6,38 +6,51 @@ type AudioWindow = Window & {
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
-export type PreparedAudio =
-  | { kind: "decoded"; audioBuffer: AudioBuffer }
-  | { kind: "raw"; buffer: ArrayBuffer };
+export type PreparedAudio = {
+  kind: "raw";
+  buffer: ArrayBuffer;
+};
+
+export type MediaSessionHandlers = {
+  play?: () => void;
+  pause?: () => void;
+  nexttrack?: () => void;
+  previoustrack?: () => void;
+};
 
 /**
- * Mobile-friendly audio player.
+ * Mobile-friendly audio player based on HTMLAudioElement.
+ * Prefer HTMLAudioElement over Web Audio so playback continues when the tab
+ * is backgrounded (AudioContext is typically suspended on hide).
  * iOS Safari blocks Audio.play() after async work unless unlocked
  * during the original user gesture — call unlock() synchronously on click.
  */
 export class MobileAudioPlayer {
-  private ctx: AudioContext | null = null;
   private element: HTMLAudioElement | null = null;
   private objectUrl: string | null = null;
-  private source: AudioBufferSourceNode | null = null;
   private unlocked = false;
+  private playToken = 0;
+  private settleCurrent: ((reason: "ended" | "stopped" | "error") => void) | null =
+    null;
 
   /** Call synchronously inside a click/touch handler. */
   unlock(): void {
+    // Touch AudioContext briefly so some browsers keep the page "media active"
     const Win = window as AudioWindow;
     const AC = window.AudioContext || Win.webkitAudioContext;
     if (AC) {
-      if (!this.ctx || this.ctx.state === "closed") {
-        this.ctx = new AC();
+      try {
+        const ctx = new AC();
+        void ctx.resume().then(() => {
+          void ctx.close();
+        });
+      } catch {
+        /* ignore */
       }
-      void this.ctx.resume();
     }
 
     if (!this.element) {
-      this.element = new Audio();
-      this.element.setAttribute("playsinline", "true");
-      this.element.setAttribute("webkit-playsinline", "true");
-      this.element.preload = "auto";
+      this.element = this.createElement();
     }
 
     // Kick HTMLAudioElement unlock while user gesture is still active
@@ -50,28 +63,22 @@ export class MobileAudioPlayer {
           if (this.element) this.element.currentTime = 0;
         })
         .catch(() => {
-          /* ignore — Web Audio path may still work */
+          /* ignore — real playback may still work after another tap */
         });
     }
 
     this.unlocked = true;
   }
 
-  private stopSource(): void {
-    if (this.source) {
-      try {
-        this.source.onended = null;
-        this.source.stop();
-      } catch {
-        /* already stopped */
-      }
-      try {
-        this.source.disconnect();
-      } catch {
-        /* ignore */
-      }
-      this.source = null;
-    }
+  private createElement(): HTMLAudioElement {
+    const el = new Audio();
+    // Keep inline on mobile, but still allow OS media session / background
+    el.setAttribute("playsinline", "true");
+    el.setAttribute("webkit-playsinline", "true");
+    el.preload = "auto";
+    // Helps some mobile browsers treat this as ongoing media
+    el.setAttribute("x-webkit-airplay", "allow");
+    return el;
   }
 
   private revokeUrl(): void {
@@ -81,15 +88,14 @@ export class MobileAudioPlayer {
     }
   }
 
-  /** Decode ahead of time so playback can start with almost no gap. */
+  private finishPlayback(reason: "ended" | "stopped" | "error"): void {
+    const settle = this.settleCurrent;
+    this.settleCurrent = null;
+    settle?.(reason);
+  }
+
+  /** Keep original bytes for HTMLAudioElement (background-safe) playback. */
   async prepare(buffer: ArrayBuffer): Promise<PreparedAudio> {
-    if (this.ctx) {
-      if (this.ctx.state === "suspended") {
-        await this.ctx.resume();
-      }
-      const audioBuffer = await this.ctx.decodeAudioData(buffer.slice(0));
-      return { kind: "decoded", audioBuffer };
-    }
     return { kind: "raw", buffer };
   }
 
@@ -100,37 +106,13 @@ export class MobileAudioPlayer {
       );
     }
 
-    if (prepared.kind === "decoded") {
-      if (!this.ctx) {
-        throw new Error("音频上下文不可用");
-      }
-      if (this.ctx.state === "suspended") {
-        await this.ctx.resume();
-      }
-      this.stopSource();
-
-      await new Promise<void>((resolve, reject) => {
-        const source = this.ctx!.createBufferSource();
-        this.source = source;
-        source.buffer = prepared.audioBuffer;
-        source.connect(this.ctx!.destination);
-        source.onended = () => {
-          if (this.source === source) this.source = null;
-          resolve();
-        };
-        try {
-          source.start(0);
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error("音频播放失败"));
-        }
-      });
-      return;
-    }
-
     if (!this.element) {
-      this.element = new Audio();
-      this.element.setAttribute("playsinline", "true");
+      this.element = this.createElement();
     }
+
+    // Cancel any in-flight clip so callers never hang on pause/seek
+    this.finishPlayback("stopped");
+    const token = ++this.playToken;
 
     this.element.pause();
     this.revokeUrl();
@@ -139,27 +121,40 @@ export class MobileAudioPlayer {
     this.element.src = this.objectUrl;
     this.element.load();
 
-    await new Promise<void>((resolve, reject) => {
-      const el = this.element!;
-      const onEnded = () => {
-        cleanup();
-        resolve();
-      };
-      const onError = () => {
-        cleanup();
-        reject(new Error("音频播放失败"));
-      };
-      const cleanup = () => {
-        el.removeEventListener("ended", onEnded);
-        el.removeEventListener("error", onError);
-      };
-      el.addEventListener("ended", onEnded);
-      el.addEventListener("error", onError);
-      void el.play().catch((err: unknown) => {
-        cleanup();
-        reject(normalizePlayError(err));
-      });
-    });
+    const outcome = await new Promise<"ended" | "stopped" | "error">(
+      (resolve, reject) => {
+        const el = this.element!;
+        const onEnded = () => this.finishPlayback("ended");
+        const onError = () => this.finishPlayback("error");
+
+        this.settleCurrent = (reason) => {
+          el.removeEventListener("ended", onEnded);
+          el.removeEventListener("error", onError);
+          resolve(reason);
+        };
+
+        el.addEventListener("ended", onEnded);
+        el.addEventListener("error", onError);
+
+        void el.play().catch((err: unknown) => {
+          if (token !== this.playToken) {
+            this.finishPlayback("stopped");
+            return;
+          }
+          el.removeEventListener("ended", onEnded);
+          el.removeEventListener("error", onError);
+          this.settleCurrent = null;
+          reject(normalizePlayError(err));
+        });
+      },
+    );
+
+    if (token !== this.playToken || outcome === "stopped") {
+      return;
+    }
+    if (outcome === "error") {
+      throw new Error("音频播放失败");
+    }
   }
 
   async playArrayBuffer(buffer: ArrayBuffer): Promise<void> {
@@ -168,7 +163,8 @@ export class MobileAudioPlayer {
   }
 
   stop(): void {
-    this.stopSource();
+    this.playToken += 1;
+    this.finishPlayback("stopped");
     if (this.element) {
       this.element.pause();
       this.element.removeAttribute("src");
@@ -179,6 +175,62 @@ export class MobileAudioPlayer {
       }
     }
     this.revokeUrl();
+  }
+
+  isPlaying(): boolean {
+    return !!this.element && !this.element.paused && !this.element.ended;
+  }
+}
+
+export function setMediaSession(
+  meta: { title: string; artist?: string; album?: string },
+  handlers: MediaSessionHandlers,
+): void {
+  if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+    return;
+  }
+
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: meta.title,
+      artist: meta.artist || "听页 ListenPage",
+      album: meta.album || "EPUB 朗读",
+    });
+  } catch {
+    /* MediaMetadata may be unavailable */
+  }
+
+  const bind = (
+    action: MediaSessionAction,
+    handler: (() => void) | undefined,
+  ) => {
+    try {
+      if (handler) {
+        navigator.mediaSession.setActionHandler(action, () => handler());
+      } else {
+        navigator.mediaSession.setActionHandler(action, null);
+      }
+    } catch {
+      /* unsupported action on this browser */
+    }
+  };
+
+  bind("play", handlers.play);
+  bind("pause", handlers.pause);
+  bind("nexttrack", handlers.nexttrack);
+  bind("previoustrack", handlers.previoustrack);
+}
+
+export function setMediaSessionPlaybackState(
+  state: "none" | "paused" | "playing",
+): void {
+  if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+    return;
+  }
+  try {
+    navigator.mediaSession.playbackState = state;
+  } catch {
+    /* ignore */
   }
 }
 
