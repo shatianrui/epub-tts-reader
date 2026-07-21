@@ -9,6 +9,8 @@ import {
 } from "@/lib/types";
 import { loadSettings, saveSettings } from "@/lib/settings";
 import { fetchVoices } from "@/lib/tts";
+import { useAuth } from "@/lib/auth";
+import { uploadSettings } from "@/lib/sync";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -17,6 +19,7 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
+  const { user } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
   const [loadingVoices, setLoadingVoices] = useState(false);
@@ -56,6 +59,9 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   function handleSave() {
     saveSettings(settings);
     onSaved?.(settings);
+    if (user) {
+      void uploadSettings(settings);
+    }
     setMessage("设置已保存");
     setTimeout(() => onClose(), 400);
   }
@@ -181,6 +187,36 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                 }))
               }
             />
+          </label>
+
+          <label className="field checkbox-field">
+            <input
+              type="checkbox"
+              checked={settings.autoNextChapter}
+              onChange={(e) =>
+                setSettings((s) => ({ ...s, autoNextChapter: e.target.checked }))
+              }
+            />
+            <span>自动朗读下一章</span>
+          </label>
+
+          <label className="field">
+            <span>章节间隔：{settings.chapterGap} 秒</span>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={1}
+              value={settings.chapterGap}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  chapterGap: Number(e.target.value),
+                }))
+              }
+              disabled={!settings.autoNextChapter}
+            />
+            <small>开启自动下一章后，每章结束后暂停的秒数</small>
           </label>
 
           {error && <p className="form-error">{error}</p>}

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
 import { synthesizeSpeech } from "@/lib/tts";
+import { useAuth } from "@/lib/auth";
+import { uploadProgress } from "@/lib/sync";
 import {
   MobileAudioPlayer,
   normalizePlayError,
@@ -51,6 +53,7 @@ export function Reader({
   onOpenSettings,
   onBack,
 }: ReaderProps) {
+  const { user } = useAuth();
   const [chapterIndex, setChapterIndex] = useState(
     initialProgress?.chapterIndex ?? 0,
   );
@@ -90,14 +93,18 @@ export function Reader({
 
   const persist = useCallback(
     async (c: number, p: number) => {
-      await saveProgress({
+      const progress = {
         bookId: book.id,
         chapterIndex: c,
         paragraphIndex: p,
         updatedAt: Date.now(),
-      });
+      };
+      await saveProgress(progress);
+      if (user) {
+        void uploadProgress(progress);
+      }
     },
-    [book.id],
+    [book.id, user],
   );
 
   const stop = useCallback(() => {
@@ -278,6 +285,23 @@ export function Reader({
             stop();
             return;
           }
+
+          const isNewChapter = next.chapter !== pos.chapter;
+          if (isNewChapter) {
+            if (!settings.autoNextChapter) {
+              setStatus(`${ch.title} 朗读完成，点击继续下一章`);
+              stop();
+              return;
+            }
+            if (settings.chapterGap > 0) {
+              setStatus(`第 ${next.chapter + 1} 章即将开始…`);
+              await new Promise<void>((r) =>
+                setTimeout(r, settings.chapterGap * 1000),
+              );
+              if (!stillActive()) return;
+            }
+          }
+
           pos = next;
         } catch (e) {
           if (!stillActive()) return;
@@ -386,6 +410,19 @@ export function Reader({
       setMediaSessionPlaybackState("none");
     };
   }, []);
+
+  useEffect(() => {
+    function handleBeforeUnload() {
+      const pos = posRef.current;
+      void persist(pos.chapter, pos.paragraph);
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("pagehide", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("pagehide", handleBeforeUnload);
+    };
+  }, [persist]);
 
   return (
     <div className="reader">
