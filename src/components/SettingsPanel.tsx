@@ -189,6 +189,36 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
             />
           </label>
 
+          <label className="field checkbox-field">
+            <input
+              type="checkbox"
+              checked={settings.autoNextChapter}
+              onChange={(e) =>
+                setSettings((s) => ({ ...s, autoNextChapter: e.target.checked }))
+              }
+            />
+            <span>自动朗读下一章</span>
+          </label>
+
+          <label className="field">
+            <span>章节间隔：{settings.chapterGap} 秒</span>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={1}
+              value={settings.chapterGap}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  chapterGap: Number(e.target.value),
+                }))
+              }
+              disabled={!settings.autoNextChapter}
+            />
+            <small>开启自动下一章后，每章结束后暂停的秒数</small>
+          </label>
+
           {error && <p className="form-error">{error}</p>}
           {message && <p className="form-ok">{message}</p>}
         </div>

@@ -285,6 +285,23 @@ export function Reader({
             stop();
             return;
           }
+
+          const isNewChapter = next.chapter !== pos.chapter;
+          if (isNewChapter) {
+            if (!settings.autoNextChapter) {
+              setStatus(`${ch.title} 朗读完成，点击继续下一章`);
+              stop();
+              return;
+            }
+            if (settings.chapterGap > 0) {
+              setStatus(`第 ${next.chapter + 1} 章即将开始…`);
+              await new Promise<void>((r) =>
+                setTimeout(r, settings.chapterGap * 1000),
+              );
+              if (!stillActive()) return;
+            }
+          }
+
           pos = next;
         } catch (e) {
           if (!stillActive()) return;
@@ -393,6 +410,19 @@ export function Reader({
       setMediaSessionPlaybackState("none");
     };
   }, []);
+
+  useEffect(() => {
+    function handleBeforeUnload() {
+      const pos = posRef.current;
+      void persist(pos.chapter, pos.paragraph);
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("pagehide", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("pagehide", handleBeforeUnload);
+    };
+  }, [persist]);
 
   return (
     <div className="reader">

@@ -32,6 +32,8 @@ export interface AppSettings {
   model: string;
   speed: number;
   languageBoost: string;
+  autoNextChapter: boolean;
+  chapterGap: number;
 }
 
 export interface VoiceOption {
@@ -49,6 +51,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   model: "speech-2.8-turbo",
   speed: 1,
   languageBoost: "Chinese",
+  autoNextChapter: true,
+  chapterGap: 0,
 };
 
 export const API_BASE_OPTIONS = [

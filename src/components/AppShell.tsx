@@ -91,6 +91,29 @@ export function AppShell() {
     }
   }, [user, authLoading, handleSync]);
 
+  useEffect(() => {
+    if (!user) return;
+
+    const interval = setInterval(() => {
+      void handleSync();
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [user, handleSync]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void handleSync();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [user, handleSync]);
+
   async function handleFiles(files: FileList | File[]) {
     const file = Array.from(files).find((f) =>
       f.name.toLowerCase().endsWith(".epub"),
