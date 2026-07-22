@@ -15,6 +15,14 @@
   --radius: 18px;
   --font-display: var(--font-display);
   --font-body: var(--font-body);
+  --app-vh: 100dvh;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --page-pad-x: 1.25rem;
+  --dock-height: 5.5rem;
+  --touch-min: 44px;
 }
 
 @theme inline {
@@ -814,22 +822,48 @@ label {
   overscroll-behavior-y: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 .platform-android .shell {
-  min-height: 100dvh;
+  min-height: var(--app-vh, 100dvh);
 }
 
 .platform-android .hero {
-  padding-top: calc(0.85rem + env(safe-area-inset-top));
+  padding-top: calc(0.85rem + var(--safe-top));
+  padding-left: calc(var(--page-pad-x) + var(--safe-left));
+  padding-right: calc(var(--page-pad-x) + var(--safe-right));
+}
+
+.platform-android .main {
+  padding-left: calc(0.85rem + var(--safe-left));
+  padding-right: calc(0.85rem + var(--safe-right));
+  padding-bottom: calc(1.5rem + var(--safe-bottom));
 }
 
 .platform-android .reader-bar {
-  top: env(safe-area-inset-top);
+  top: 0;
+  padding-top: calc(0.45rem + var(--safe-top));
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+.platform-android .reader {
+  padding-left: calc(0.9rem + var(--safe-left));
+  padding-right: calc(0.9rem + var(--safe-right));
+  padding-bottom: calc(var(--dock-height) + var(--safe-bottom) + 1.25rem);
 }
 
 .platform-android .reader-dock {
-  padding-bottom: calc(0.85rem + env(safe-area-inset-bottom));
+  width: 100%;
+  max-width: none;
+  left: 0;
+  right: 0;
+  transform: none;
+  padding: 0.85rem 1.1rem calc(0.95rem + var(--safe-bottom));
+  gap: 0.75rem;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
 }
 
 .platform-android .btn-primary,
@@ -840,8 +874,252 @@ label {
   -webkit-tap-highlight-color: transparent;
 }
 
+.platform-android .settings-overlay {
+  padding: 0;
+  place-items: end center;
+}
+
 .platform-android .settings-panel {
-  max-height: calc(100dvh - env(safe-area-inset-top));
+  width: 100%;
+  max-height: calc(var(--app-vh, 100dvh) - var(--safe-top) - 0.5rem);
+  border-radius: 22px 22px 0 0;
+}
+
+.platform-android .settings-header {
+  padding-top: 1.05rem;
+}
+
+.platform-android .settings-footer {
+  padding-bottom: calc(0.9rem + var(--safe-bottom));
+}
+
+.platform-android .modal-overlay {
+  padding: calc(0.75rem + var(--safe-top)) 0.85rem
+    calc(0.75rem + var(--safe-bottom));
+  align-items: end;
+}
+
+.platform-android .modal {
+  width: min(480px, 100%);
+  margin-bottom: 0.25rem;
+}
+
+/* Galaxy S24 Ultra / large tall Android phones */
+.device-large-phone,
+.device-tall.platform-android {
+  --page-pad-x: 1.35rem;
+  --dock-height: 6.25rem;
+  --touch-min: 48px;
+  --radius: 20px;
+}
+
+.device-large-phone .brand,
+.device-tall.platform-android .brand {
+  font-size: clamp(1.55rem, 5.5vw, 2rem);
+}
+
+.device-large-phone .hero h1,
+.device-tall.platform-android .hero h1 {
+  font-size: clamp(1.45rem, 5vw, 1.85rem);
+  max-width: 18ch;
+  line-height: 1.28;
+}
+
+.device-large-phone .hero-sub,
+.device-tall.platform-android .hero-sub {
+  font-size: 1.02rem;
+  max-width: 34rem;
+  line-height: 1.65;
+}
+
+.device-large-phone .hero-actions,
+.device-tall.platform-android .hero-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.device-large-phone .hero-actions .btn-primary,
+.device-large-phone .hero-actions .btn-secondary,
+.device-large-phone .upload-label,
+.device-tall.platform-android .hero-actions .btn-primary,
+.device-tall.platform-android .hero-actions .btn-secondary,
+.device-tall.platform-android .upload-label {
+  min-height: var(--touch-min);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.device-large-phone .book-grid,
+.device-tall.platform-android .book-grid {
+  grid-template-columns: 1fr;
+  gap: 0.9rem;
+}
+
+.device-large-phone .book-item,
+.device-tall.platform-android .book-item {
+  grid-template-columns: 78px 1fr;
+  gap: 1rem;
+  padding: 1rem;
+  min-height: 112px;
+  border-radius: 18px;
+}
+
+.device-large-phone .book-cover,
+.device-tall.platform-android .book-cover {
+  width: 78px;
+  height: 104px;
+  border-radius: 10px;
+}
+
+.device-large-phone .book-meta strong,
+.device-tall.platform-android .book-meta strong {
+  font-size: 1.05rem;
+}
+
+.device-large-phone .reader-content,
+.device-tall.platform-android .reader-content {
+  padding: 1.35rem 1.15rem 2rem;
+  font-size: 1.08rem;
+  line-height: 1.95;
+  border-radius: 20px;
+}
+
+.device-large-phone .reader-content h1,
+.device-tall.platform-android .reader-content h1 {
+  font-size: 1.35rem;
+  margin-bottom: 1.35rem;
+}
+
+.device-large-phone .paragraph,
+.device-tall.platform-android .paragraph {
+  margin-bottom: 1.1rem;
+  padding: 0.55rem 0.55rem;
+}
+
+.device-large-phone .reader-toolbar select,
+.device-tall.platform-android .reader-toolbar select {
+  min-height: var(--touch-min);
+  font-size: 1rem;
+  border-radius: 14px;
+}
+
+.device-large-phone .player-controls,
+.device-tall.platform-android .player-controls {
+  display: none;
+}
+
+.device-large-phone .reader-dock,
+.device-tall.platform-android .reader-dock {
+  padding: 0.95rem 1.25rem calc(1.05rem + max(var(--safe-bottom), 18px));
+  gap: 0.85rem;
+}
+
+.device-large-phone .dock-btn,
+.device-tall.platform-android .dock-btn {
+  width: 52px;
+  height: 52px;
+  font-size: 1.1rem;
+}
+
+.device-large-phone .dock-play-btn,
+.device-tall.platform-android .dock-play-btn {
+  width: 68px;
+  height: 68px;
+  box-shadow: 0 10px 28px rgba(15, 107, 92, 0.3);
+}
+
+.device-large-phone .dock-play-icon,
+.device-tall.platform-android .dock-play-icon {
+  font-size: 1.3rem;
+}
+
+.device-large-phone .dock-meta strong,
+.device-tall.platform-android .dock-meta strong {
+  font-size: 1rem;
+}
+
+.device-large-phone .dock-meta span,
+.device-tall.platform-android .dock-meta span {
+  font-size: 0.84rem;
+}
+
+.device-large-phone .field input,
+.device-large-phone .field select,
+.device-tall.platform-android .field input,
+.device-tall.platform-android .field select {
+  min-height: var(--touch-min);
+  font-size: 1.02rem;
+  border-radius: 14px;
+}
+
+.device-large-phone .provider-chip,
+.device-tall.platform-android .provider-chip {
+  min-height: var(--touch-min);
+  border-radius: 14px;
+}
+
+.device-large-phone .settings-body,
+.device-tall.platform-android .settings-body {
+  gap: 1.1rem;
+  padding: 1.1rem 1.25rem 0.75rem;
+}
+
+.device-large-phone .settings-footer .btn-primary,
+.device-large-phone .settings-footer .btn-secondary,
+.device-tall.platform-android .settings-footer .btn-primary,
+.device-tall.platform-android .settings-footer .btn-secondary {
+  min-height: var(--touch-min);
+  min-width: 7rem;
+}
+
+.device-samsung.platform-android .reader-dock {
+  /* One UI gesture hint bar needs extra clearance */
+  padding-bottom: calc(1.15rem + max(var(--safe-bottom), 22px));
+}
+
+.device-samsung.platform-android .reader {
+  padding-bottom: calc(var(--dock-height) + max(var(--safe-bottom), 22px) + 1.5rem);
+}
+
+.device-hires.platform-android .reader-content,
+.device-hires .book-item,
+.device-hires .settings-panel {
+  /* crisp edges on Quad HD+ panels */
+  box-shadow: 0 12px 36px rgba(20, 33, 61, 0.07);
+}
+
+@media (min-width: 400px) and (max-width: 540px) and (min-height: 820px) {
+  .platform-android .hero-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .platform-android .book-item {
+    grid-template-columns: 78px 1fr;
+  }
+
+  .platform-android .book-cover {
+    width: 78px;
+    height: 104px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .platform-android .reader-dock {
+    padding-top: 0.55rem;
+    padding-bottom: calc(0.55rem + var(--safe-bottom));
+  }
+
+  .platform-android .dock-play-btn {
+    width: 52px;
+    height: 52px;
+  }
+
+  .platform-android .reader {
+    padding-bottom: calc(4.5rem + var(--safe-bottom));
+  }
 }
 
 .hero-top-bar {
