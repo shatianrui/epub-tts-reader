@@ -198,10 +198,17 @@ export async function fetchVoices(
   return fetchMiniMaxVoices(settings);
 }
 
+export type SynthesizedSpeech = {
+  buffer: ArrayBuffer;
+  /** Authoritative duration from the TTS API when available. */
+  durationSec?: number;
+  mimeType?: string;
+};
+
 async function synthesizeMiniMax(
   text: string,
   settings: AppSettings,
-): Promise<ArrayBuffer> {
+): Promise<SynthesizedSpeech> {
   if (!settings.apiKey?.trim()) {
     throw new Error("请先在设置中填写 MiniMax Token Plan API Key");
   }
@@ -261,13 +268,16 @@ async function synthesizeMiniMax(
     throw new Error("MiniMax 未返回音频数据");
   }
 
-  return hexToArrayBuffer(audioHex);
+  const buffer = hexToArrayBuffer(audioHex);
+  // MiniMax is configured at 128 kbps — byte estimate is a solid floor.
+  const durationSec = (buffer.byteLength * 8) / 128_000;
+  return { buffer, durationSec, mimeType: "audio/mpeg" };
 }
 
 async function synthesizeGrok(
   text: string,
   settings: AppSettings,
-): Promise<ArrayBuffer> {
+): Promise<SynthesizedSpeech> {
   if (!settings.grokApiKey?.trim()) {
     throw new Error("请先在设置中填写 Grok / xAI API Key");
   }
@@ -308,10 +318,21 @@ async function synthesizeGrok(
     const binary = atob(b64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes.buffer;
+    const durationSec =
+      typeof json.duration === "number" && json.duration > 0
+        ? json.duration
+        : undefined;
+    const mimeType =
+      typeof json.content_type === "string" && json.content_type
+        ? json.content_type
+        : "audio/mpeg";
+    return { buffer: bytes.buffer, durationSec, mimeType };
   }
 
-  return res.arrayBuffer();
+  const mimeType = contentType.includes("audio/")
+    ? contentType.split(";")[0].trim()
+    : "audio/mpeg";
+  return { buffer: await res.arrayBuffer(), mimeType };
 }
 
 export async function testGrokConnection(
@@ -351,7 +372,7 @@ export async function testGrokConnection(
 export async function synthesizeSpeech(
   text: string,
   settings: AppSettings,
-): Promise<ArrayBuffer> {
+): Promise<SynthesizedSpeech> {
   if (!text?.trim()) {
     throw new Error("朗读文本为空");
   }

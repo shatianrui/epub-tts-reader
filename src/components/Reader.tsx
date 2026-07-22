@@ -135,7 +135,7 @@ export function Reader({
       }
 
       const promise = synthesizeSpeech(text, settings)
-        .then((buffer) => player.prepare(buffer))
+        .then((speech) => player.prepare(speech))
         .catch((err) => {
           prefetchRef.current.delete(key);
           throw err;
@@ -288,6 +288,12 @@ export function Reader({
           await player.playPrepared(prepared);
 
           if (!stillActive()) return;
+
+          // Brief breath between paragraphs so the last syllables are never
+          // overlapped by the next clip starting immediately.
+          await new Promise<void>((r) => setTimeout(r, 180));
+          if (!stillActive()) return;
+
           const next = advancePos(book.chapters, pos);
           if (!next) {
             setStatus("全书朗读完成");
