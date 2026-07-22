@@ -41,10 +41,11 @@ function resolvePath(base: string, relative: string): string {
 }
 
 function splitHref(href: string): { path: string; fragment?: string } {
-  const [path, fragment] = href.split("#");
+  const hash = href.indexOf("#");
+  if (hash < 0) return { path: href };
   return {
-    path: path || "",
-    fragment: fragment || undefined,
+    path: href.slice(0, hash),
+    fragment: href.slice(hash + 1) || undefined,
   };
 }
 
@@ -52,11 +53,23 @@ function findZipFile(zip: JSZip, path: string) {
   const normalized = path.replace(/^\.\//, "").replace(/^\/+/, "");
   const direct = zip.file(normalized);
   if (direct) return direct;
+
   const lower = normalized.toLowerCase();
-  const match = Object.keys(zip.files).find(
+  const exact = Object.keys(zip.files).find(
     (k) => k.replace(/\\/g, "/").toLowerCase() === lower,
   );
-  return match ? zip.file(match) : null;
+  if (exact) return zip.file(exact);
+
+  const baseName = normalized.split("/").pop()?.toLowerCase();
+  if (baseName) {
+    const suffix = Object.keys(zip.files).find((k) => {
+      const name = k.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+      return name === baseName;
+    });
+    if (suffix) return zip.file(suffix);
+  }
+
+  return null;
 }
 
 async function blobToDataUrl(blob: Blob): Promise<string> {
@@ -148,14 +161,51 @@ function extractParagraphs(html: string): string[] {
   return extractParagraphsFromDocument(doc);
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findIdPositionInHtml(html: string, id: string): number {
+  const variants = [id, decodePath(id)];
+  for (const variant of variants) {
+    const escaped = escapeRegex(variant);
+    const patterns = [
+      new RegExp(`\\bid=["']${escaped}["']`, "i"),
+      new RegExp(`\\bname=["']${escaped}["']`, "i"),
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match?.index !== undefined) return match.index;
+    }
+  }
+  return -1;
+}
+
 function findAnchorElement(doc: Document, fragment?: string): Element | null {
   if (!fragment) return doc.body;
   const decoded = decodePath(fragment);
-  const byId = doc.getElementById(decoded);
-  if (byId) return byId;
-  const byName = doc.querySelector(`[name="${CSS.escape(decoded)}"]`);
-  if (byName) return byName;
-  return doc.body?.querySelector(`#${CSS.escape(decoded)}`) ?? null;
+  const candidates = Array.from(new Set([decoded, fragment]));
+
+  for (const id of candidates) {
+    const byId = doc.getElementById(id);
+    if (byId) return byId;
+
+    try {
+      const escaped = CSS.escape(id);
+      const bySelector = doc.querySelector(`[id="${escaped}"], [name="${escaped}"]`);
+      if (bySelector) return bySelector;
+    } catch {
+      /* ignore invalid selector */
+    }
+  }
+
+  const lower = decoded.toLowerCase();
+  for (const el of Array.from(doc.querySelectorAll("[id], a[name], [name]"))) {
+    const attr = el.getAttribute("id") || el.getAttribute("name") || "";
+    if (attr.toLowerCase() === lower) return el;
+  }
+
+  return null;
 }
 
 function sliceHtmlByAnchors(
@@ -163,15 +213,34 @@ function sliceHtmlByAnchors(
   startFragment?: string,
   endFragment?: string,
 ): string {
+  if (!startFragment && !endFragment) return html;
+
+  const startPos = startFragment ? findIdPositionInHtml(html, startFragment) : 0;
+  const endPos = endFragment ? findIdPositionInHtml(html, endFragment) : -1;
+
+  if (startFragment && startPos >= 0) {
+    const sliceEnd = endPos > startPos ? endPos : html.length;
+    return html.slice(startPos, sliceEnd);
+  }
+
   const doc = new DOMParser().parseFromString(html, "text/html");
   const body = doc.body;
   if (!body) return html;
 
-  const startEl = findAnchorElement(doc, startFragment) ?? body;
+  const startEl = startFragment ? findAnchorElement(doc, startFragment) : body;
   const endEl = endFragment ? findAnchorElement(doc, endFragment) : null;
+  if (!startEl) return "";
 
-  if (!startFragment && !endFragment) {
-    return html;
+  const wrapper = doc.createElement("div");
+  const nodes = Array.from(body.querySelectorAll("*"));
+  const startIdx = nodes.indexOf(startEl as Element);
+  const endIdx = endEl ? nodes.indexOf(endEl as Element) : nodes.length;
+
+  if (startIdx >= 0 && endIdx > startIdx) {
+    for (let i = startIdx; i < endIdx; i++) {
+      wrapper.appendChild(nodes[i].cloneNode(true));
+    }
+    return wrapper.innerHTML;
   }
 
   const range = doc.createRange();
@@ -181,10 +250,7 @@ function sliceHtmlByAnchors(
   } else {
     range.setEndAfter(body.lastChild || body);
   }
-
-  const fragment = range.cloneContents();
-  const wrapper = doc.createElement("div");
-  wrapper.appendChild(fragment);
+  wrapper.appendChild(range.cloneContents());
   return wrapper.innerHTML;
 }
 
@@ -192,8 +258,51 @@ function titleFromHtml(html: string): string | undefined {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const heading = doc.querySelector("h1, h2, h3, title");
   const text = heading ? textFromElement(heading) : "";
-  if (text && text.length <= 60) return text;
+  if (text && text.length <= 80) return text;
   return undefined;
+}
+
+function isLikelyChapterHeading(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2 || t.length > 80) return false;
+  return /^(第[一二三四五六七八九十百千\d]+[卷编部篇章节回]|卷[一二三四五六七八九十\d]+|Chapter|CHAPTER|\d+[\.\、])/i.test(
+    t,
+  );
+}
+
+function splitByHeadings(html: string): BookChapter[] {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const body = doc.body;
+  if (!body) return [];
+
+  const headings = Array.from(body.querySelectorAll("h1, h2, h3")).filter((el) =>
+    isLikelyChapterHeading(textFromElement(el)),
+  );
+  if (headings.length < 2) return [];
+
+  const chapters: BookChapter[] = [];
+  for (let i = 0; i < headings.length; i++) {
+    const current = headings[i];
+    const next = headings[i + 1];
+    const range = doc.createRange();
+    range.setStartBefore(current);
+    if (next) range.setEndBefore(next);
+    else range.setEndAfter(body.lastChild || body);
+
+    const wrapper = doc.createElement("div");
+    wrapper.appendChild(range.cloneContents());
+    const paragraphs = extractParagraphs(wrapper.innerHTML);
+    if (paragraphs.length === 0) continue;
+
+    chapters.push({
+      id: current.id || `heading-${i}`,
+      href: "",
+      title: textFromElement(current),
+      paragraphs,
+    });
+  }
+
+  return chapters;
 }
 
 function parseNcxNav(ncxXml: string, ncxPath: string): NavEntry[] {
@@ -252,6 +361,18 @@ function parseEpub3Nav(navHtml: string, navPath: string): NavEntry[] {
   }
 
   return entries;
+}
+
+function dedupeNavEntries(navEntries: NavEntry[]): NavEntry[] {
+  const seen = new Set<string>();
+  const result: NavEntry[] = [];
+  for (const entry of navEntries) {
+    const key = `${normalizePathKey(entry.href)}#${entry.fragment || ""}@${entry.title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(entry);
+  }
+  return result;
 }
 
 function buildChaptersForSpineItem(
@@ -314,7 +435,156 @@ function buildChaptersForSpineItem(
     });
   }
 
+  if (chapters.length === 0) {
+    const headingChapters = splitByHeadings(html);
+    if (headingChapters.length > 0) {
+      return headingChapters.map((chapter, index) => ({
+        ...chapter,
+        id: chapter.id || `${spineId}-h${index}`,
+        href: filePath,
+      }));
+    }
+  }
+
   return chapters;
+}
+
+async function buildChaptersFromNav(
+  navEntries: NavEntry[],
+  zip: JSZip,
+): Promise<BookChapter[]> {
+  const sorted = [...navEntries].sort((a, b) => a.order - b.order);
+  const chapters: BookChapter[] = [];
+  const htmlCache = new Map<string, string>();
+
+  for (let i = 0; i < sorted.length; i++) {
+    const current = sorted[i];
+    const fileKey = normalizePathKey(current.href);
+    const file = findZipFile(zip, current.href);
+    if (!file) continue;
+
+    let html = htmlCache.get(fileKey);
+    if (!html) {
+      html = await file.async("text");
+      htmlCache.set(fileKey, html);
+    }
+
+    const nextSameFile = sorted
+      .slice(i + 1)
+      .find((entry) => normalizePathKey(entry.href) === fileKey);
+
+    const slice = sliceHtmlByAnchors(
+      html,
+      current.fragment,
+      nextSameFile?.fragment,
+    );
+    let paragraphs = extractParagraphs(slice);
+
+    if (paragraphs.length === 0 && !current.fragment) {
+      paragraphs = extractParagraphs(html);
+    }
+
+    if (paragraphs.length === 0) continue;
+    if (isSkippableNavChapter(current.title, paragraphs)) continue;
+
+    chapters.push({
+      id: current.fragment
+        ? `${fileKey}#${current.fragment}`
+        : `${fileKey}-${i}`,
+      href: current.href,
+      title:
+        current.title ||
+        titleFromHtml(slice) ||
+        paragraphs.find((p) => p.length < 40)?.slice(0, 40) ||
+        `第 ${chapters.length + 1} 章`,
+      paragraphs,
+    });
+  }
+
+  return chapters;
+}
+
+async function buildChaptersFromSpine(
+  effectiveSpineIds: string[],
+  manifest: Map<string, { href: string; mediaType: string; properties?: string }>,
+  opfDir: string,
+  dedupedNav: NavEntry[],
+  zip: JSZip,
+): Promise<BookChapter[]> {
+  const chapters: BookChapter[] = [];
+
+  for (const spineId of effectiveSpineIds) {
+    const item = manifest.get(spineId);
+    if (!item) continue;
+
+    const isHtml =
+      /html|xml|xhtml/i.test(item.mediaType) ||
+      /\.x?html?$/i.test(item.href) ||
+      item.mediaType === "";
+    if (!isHtml) continue;
+
+    const href = resolvePath(opfDir, item.href);
+    const file = findZipFile(zip, href);
+    if (!file) continue;
+
+    const html = await file.async("text");
+    const fileChapters = buildChaptersForSpineItem(
+      spineId,
+      href,
+      html,
+      dedupedNav,
+    );
+
+    if (fileChapters.length === 0) {
+      const paragraphs = extractParagraphs(html);
+      if (paragraphs.length === 0) continue;
+      chapters.push({
+        id: spineId,
+        href,
+        title:
+          titleFromHtml(html) ||
+          paragraphs.find((p) => p.length < 40)?.slice(0, 40) ||
+          `第 ${chapters.length + 1} 章`,
+        paragraphs,
+      });
+      continue;
+    }
+
+    chapters.push(...fileChapters);
+  }
+
+  return chapters;
+}
+
+function isSkippableNavChapter(title: string, paragraphs: string[]): boolean {
+  if (paragraphs.length === 0) return true;
+  if (paragraphs.length > 1) return false;
+  const only = paragraphs[0] || "";
+  if (only.length > 40) return false;
+  return /^(封面|封底|目录|版权|title page|cover|toc|contents)$/i.test(
+    title.trim(),
+  );
+}
+
+function pickBetterChapters(
+  spineChapters: BookChapter[],
+  navChapters: BookChapter[],
+  navCount: number,
+): BookChapter[] {
+  if (navChapters.length === 0) return spineChapters;
+  if (spineChapters.length === 0) return navChapters;
+
+  if (navCount >= 3 && navChapters.length > spineChapters.length) {
+    return navChapters;
+  }
+
+  if (spineChapters.length <= 2 && navChapters.length > spineChapters.length) {
+    return navChapters;
+  }
+
+  return spineChapters.length >= navChapters.length
+    ? spineChapters
+    : navChapters;
 }
 
 export interface ParsedEpub {
@@ -437,76 +707,45 @@ export async function parseEpub(data: ArrayBuffer): Promise<ParsedEpub> {
     }
   }
 
-  const dedupedNav = navEntries.filter((entry, index, all) => {
-    const key = `${normalizePathKey(entry.href)}#${entry.fragment || ""}`;
-    return (
-      all.findIndex(
-        (other) =>
-          `${normalizePathKey(other.href)}#${other.fragment || ""}` === key,
-      ) === index
-    );
-  });
+  const dedupedNav = dedupeNavEntries(navEntries);
 
-  const chapters: BookChapter[] = [];
-  for (let i = 0; i < effectiveSpineIds.length; i++) {
-    const spineId = effectiveSpineIds[i];
-    const item = manifest.get(spineId);
-    if (!item) continue;
-
-    const isHtml =
-      /html|xml|xhtml/i.test(item.mediaType) ||
-      /\.x?html?$/i.test(item.href) ||
-      item.mediaType === "";
-    if (!isHtml) continue;
-
-    const href = resolvePath(opfDir, item.href);
-    const file = findZipFile(zip, href);
-    if (!file) continue;
-
-    const html = await file.async("text");
-    const fileChapters = buildChaptersForSpineItem(
-      spineId,
-      href,
-      html,
+  const [spineChapters, navChapters] = await Promise.all([
+    buildChaptersFromSpine(
+      effectiveSpineIds,
+      manifest,
+      opfDir,
       dedupedNav,
-    );
+      zip,
+    ),
+    buildChaptersFromNav(dedupedNav, zip),
+  ]);
 
-    if (fileChapters.length === 0) {
-      const paragraphs = extractParagraphs(html);
-      if (paragraphs.length === 0) continue;
-      chapters.push({
-        id: spineId,
-        href,
-        title:
-          titleFromHtml(html) ||
-          paragraphs.find((p) => p.length < 40)?.slice(0, 40) ||
-          `第 ${chapters.length + 1} 章`,
-        paragraphs,
-      });
-      continue;
-    }
+  let chapters = pickBetterChapters(
+    spineChapters,
+    navChapters,
+    dedupedNav.length,
+  );
 
-    chapters.push(...fileChapters);
-  }
-
-  if (chapters.length === 0 && dedupedNav.length > 0) {
-    const seen = new Set<string>();
-    for (const entry of dedupedNav) {
-      const key = normalizePathKey(entry.href);
-      if (seen.has(key)) continue;
-      const file = findZipFile(zip, entry.href);
+  if (chapters.length <= 2) {
+    for (const spineId of effectiveSpineIds) {
+      const item = manifest.get(spineId);
+      if (!item) continue;
+      const href = resolvePath(opfDir, item.href);
+      const file = findZipFile(zip, href);
       if (!file) continue;
-      seen.add(key);
       const html = await file.async("text");
-      const fileChapters = buildChaptersForSpineItem(
-        entry.href,
-        entry.href,
-        html,
-        dedupedNav,
-      );
-      chapters.push(...fileChapters);
+      const headingChapters = splitByHeadings(html).map((chapter, index) => ({
+        ...chapter,
+        id: chapter.id || `${spineId}-h${index}`,
+        href,
+      }));
+      if (headingChapters.length > chapters.length) {
+        chapters = headingChapters;
+      }
     }
   }
+
+  chapters = chapters.filter((chapter) => chapter.paragraphs.length > 0);
 
   if (chapters.length === 0) {
     throw new Error("未能从 EPUB 中提取可读文本");
