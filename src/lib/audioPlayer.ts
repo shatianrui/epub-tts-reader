@@ -2,6 +2,12 @@ type AudioWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
 
+import {
+  startBackgroundPlayback,
+  stopBackgroundPlayback,
+  updateBackgroundPlayback,
+} from "./backgroundPlayback";
+
 /** Tiny silent WAV used to unlock HTMLAudioElement on iOS Safari. */
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
@@ -186,6 +192,12 @@ export function setMediaSession(
   meta: { title: string; artist?: string; album?: string },
   handlers: MediaSessionHandlers,
 ): void {
+  void updateBackgroundPlayback({
+    title: meta.title,
+    subtitle: meta.artist || meta.album || "EPUB 朗读中",
+    playing: true,
+  });
+
   if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
     return;
   }
@@ -223,7 +235,23 @@ export function setMediaSession(
 
 export function setMediaSessionPlaybackState(
   state: "none" | "paused" | "playing",
+  meta?: { title?: string; subtitle?: string },
 ): void {
+  if (state === "playing") {
+    void startBackgroundPlayback({
+      title: meta?.title || "听页 ListenPage",
+      subtitle: meta?.subtitle || "EPUB 朗读中",
+    });
+  } else if (state === "paused") {
+    void updateBackgroundPlayback({
+      title: meta?.title,
+      subtitle: meta?.subtitle || "已暂停",
+      playing: false,
+    });
+  } else {
+    void stopBackgroundPlayback();
+  }
+
   if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
     return;
   }

@@ -118,7 +118,10 @@ export function Reader({
     setPlaying(false);
     setLoading(false);
     setStatus("已暂停");
-    setMediaSessionPlaybackState("paused");
+    setMediaSessionPlaybackState("paused", {
+      title: book.chapters[posRef.current.chapter]?.title || book.title,
+      subtitle: book.author || book.title,
+    });
     playerRef.current?.stop();
     clearPrefetch();
   }, [clearPrefetch]);
@@ -178,7 +181,10 @@ export function Reader({
       playingRef.current = true;
       setPlaying(true);
       setError("");
-      setMediaSessionPlaybackState("playing");
+      setMediaSessionPlaybackState("playing", {
+        title: book.chapters[startChapter]?.title || book.title,
+        subtitle: book.author || book.title,
+      });
       setChapterIndex(startChapter);
       setParagraphIndex(startParagraph);
       posRef.current = { chapter: startChapter, paragraph: startParagraph };
@@ -240,7 +246,10 @@ export function Reader({
             },
           },
         );
-        setMediaSessionPlaybackState("playing");
+        setMediaSessionPlaybackState("playing", {
+          title: ch.title,
+          subtitle: book.author || book.title,
+        });
 
         // Scroll only when visible — rAF is throttled in background tabs
         if (
@@ -538,6 +547,52 @@ export function Reader({
           );
         })}
       </article>
+
+      <div className="reader-dock" role="toolbar" aria-label="播放控制">
+        <button
+          type="button"
+          className="dock-btn"
+          onClick={() => handleChapterChange(Math.max(0, chapterIndex - 1))}
+          disabled={chapterIndex <= 0}
+          aria-label="上一章"
+        >
+          ⏮
+        </button>
+        <button
+          type="button"
+          className="dock-play-btn"
+          onClick={handleToggle}
+          disabled={loading && !playing}
+          aria-label={playing ? (loading ? "合成中" : "暂停朗读") : "继续朗读"}
+        >
+          <span className="dock-play-icon" aria-hidden="true">
+            {playing ? (loading ? "◌" : "❚❚") : "▶"}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="dock-btn"
+          onClick={() =>
+            handleChapterChange(
+              Math.min(book.chapters.length - 1, chapterIndex + 1),
+            )
+          }
+          disabled={chapterIndex >= book.chapters.length - 1}
+          aria-label="下一章"
+        >
+          ⏭
+        </button>
+        <div className="dock-meta">
+          <strong>{chapter?.title || "未选择章节"}</strong>
+          <span>
+            {playing
+              ? loading
+                ? "合成中…"
+                : `第 ${paragraphIndex + 1} 段`
+              : status}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
