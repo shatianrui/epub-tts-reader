@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">听页 ListenPage</string>
+    <string name="title_activity_main">听页 ListenPage</string>
+    <string name="package_name">com.listenpage.epubtts</string>
+    <string name="custom_url_scheme">com.listenpage.epubtts</string>
+</resources>

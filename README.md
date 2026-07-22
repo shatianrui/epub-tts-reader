@@ -62,4 +62,48 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
 
 ## 技术栈
 
-Next.js（静态导出） · IndexedDB · JSZip · Supabase Auth/DB/Storage · MiniMax T2A
+Next.js（静态导出） · IndexedDB · JSZip · Supabase Auth/DB/Storage · MiniMax T2A · Capacitor（Android）
+
+## Android APK
+
+本应用使用 [Capacitor](https://capacitorjs.com/) 将静态网页打包为原生 Android 应用，数据与功能与网页版一致（本地书库、MiniMax 朗读、可选 Supabase 同步）。
+
+### 方式一：GitHub Actions 自动构建（推荐）
+
+推送代码到 `main` 分支后，[Build Android APK](.github/workflows/build-android-apk.yml) 工作流会自动构建 Debug APK。在仓库 **Actions** 页打开对应运行记录，从 **Artifacts** 下载 `listenpage-debug-apk`。
+
+也可在 Actions 页手动点击 **Run workflow** 触发构建。
+
+### 方式二：本地构建
+
+**环境要求：** Node.js 22+、JDK 21、Android SDK（含 platform-tools、platforms;android-36、build-tools）
+
+```bash
+npm install
+cp .env.example .env.local   # 可选：填入 Supabase 以启用云端同步
+
+# 构建网页并同步到 Android 工程
+npm run build:mobile
+
+# 构建 Debug APK（输出：android/app/build/outputs/apk/debug/app-debug.apk）
+npm run android:debug
+```
+
+将 APK 传到手机安装即可。首次安装若提示「未知来源」，请在系统设置中允许安装。
+
+### 在 Android Studio 中打开
+
+```bash
+npm run build:mobile
+npm run cap:open
+```
+
+用 Android Studio 连接真机或模拟器运行，或构建签名 Release APK 上架应用商店。
+
+### 发布版签名（可选）
+
+Release 包需自行配置签名密钥，在 `android/` 目录按 [Android 官方文档](https://developer.android.com/studio/publish/app-signing) 创建 `keystore` 并在 `app/build.gradle` 中配置 `signingConfigs`，然后执行：
+
+```bash
+npm run android:release
+```
