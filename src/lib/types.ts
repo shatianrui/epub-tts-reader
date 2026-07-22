@@ -39,6 +39,8 @@ export interface AppSettings {
   grokApiKey: string;
   grokVoiceId: string;
   grokLanguage: string;
+  /** Optional reverse proxy base, e.g. https://your-worker.workers.dev */
+  grokApiBase: string;
   autoNextChapter: boolean;
   chapterGap: number;
 }
@@ -62,6 +64,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   grokApiKey: "",
   grokVoiceId: "eve",
   grokLanguage: "zh",
+  grokApiBase: "https://api.x.ai",
   autoNextChapter: true,
   chapterGap: 0,
 };

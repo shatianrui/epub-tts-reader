@@ -1,8 +1,7 @@
 import type { AppSettings, VoiceOption } from "./types";
 import { FALLBACK_VOICES, GROK_VOICES } from "./types";
 
-const GROK_TTS_URL = "https://api.x.ai/v1/tts";
-const GROK_VOICES_URL = "https://api.x.ai/v1/tts/voices";
+const DEFAULT_GROK_BASE = "https://api.x.ai";
 
 export function hexToArrayBuffer(hex: string): ArrayBuffer {
   const clean = hex.replace(/\s/g, "");
@@ -21,6 +20,57 @@ function buildUrl(apiBase: string, path: string, groupId?: string) {
     url.searchParams.set("GroupId", groupId.trim());
   }
   return url.toString();
+}
+
+function grokBase(settings: Pick<AppSettings, "grokApiBase">) {
+  const base = (settings.grokApiBase || DEFAULT_GROK_BASE)
+    .trim()
+    .replace(/\/$/, "");
+  return base || DEFAULT_GROK_BASE;
+}
+
+function clampGrokSpeed(speed?: number) {
+  const n = Number(speed);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(1.5, Math.max(0.7, n));
+}
+
+function networkHint(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    /failed to fetch|networkerror|load failed|network request failed|cors/i.test(
+      msg,
+    )
+  ) {
+    return new Error(
+      "无法连接 Grok / xAI。请检查：① API Key 是否正确；② 网络是否可访问 api.x.ai（国内常需代理）；③ 可在设置里填写反向代理地址。",
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
+function parseGrokError(status: number, errText: string): string {
+  let msg = `Grok TTS 请求失败 (${status})`;
+  try {
+    const j = JSON.parse(errText);
+    const raw = j.error?.message || j.error || j.message || msg;
+    msg = typeof raw === "string" ? raw : JSON.stringify(raw);
+  } catch {
+    if (errText) msg = errText.slice(0, 240);
+  }
+  if (
+    status === 401 ||
+    /incorrect api key|invalid api key|unauthorized/i.test(msg)
+  ) {
+    return "Grok API Key 无效，请到 console.x.ai 重新创建并粘贴完整 Key。";
+  }
+  if (status === 403) {
+    return "Grok API 拒绝访问，请确认账号已开通 TTS 且有余额。";
+  }
+  if (status === 429) {
+    return "Grok 请求过于频繁，请稍后再试。";
+  }
+  return msg;
 }
 
 export async function fetchMiniMaxVoices(
@@ -96,16 +146,16 @@ export async function fetchMiniMaxVoices(
 }
 
 export async function fetchGrokVoices(
-  apiKey: string,
+  settings: Pick<AppSettings, "grokApiKey" | "grokApiBase">,
 ): Promise<VoiceOption[]> {
-  if (!apiKey.trim()) {
+  if (!settings.grokApiKey?.trim()) {
     return GROK_VOICES;
   }
 
   try {
-    const res = await fetch(GROK_VOICES_URL, {
+    const res = await fetch(`${grokBase(settings)}/v1/tts/voices`, {
       headers: {
-        Authorization: `Bearer ${apiKey.trim()}`,
+        Authorization: `Bearer ${settings.grokApiKey.trim()}`,
       },
     });
     if (!res.ok) return GROK_VOICES;
@@ -119,14 +169,21 @@ export async function fetchGrokVoices(
 
     if (list.length === 0) return GROK_VOICES;
 
-    const mapped: VoiceOption[] = list.map(
-      (v: { voice_id?: string; id?: string; name?: string; description?: string }) => ({
-        voice_id: v.voice_id || v.id || "",
-        voice_name: v.name || v.voice_id || v.id,
-        description: v.description ? [v.description] : undefined,
-        category: "grok" as const,
-      }),
-    ).filter((v: VoiceOption) => Boolean(v.voice_id));
+    const mapped: VoiceOption[] = list
+      .map(
+        (v: {
+          voice_id?: string;
+          id?: string;
+          name?: string;
+          description?: string;
+        }) => ({
+          voice_id: v.voice_id || v.id || "",
+          voice_name: v.name || v.voice_id || v.id,
+          description: v.description ? [v.description] : undefined,
+          category: "grok" as const,
+        }),
+      )
+      .filter((v: VoiceOption) => Boolean(v.voice_id));
 
     return mapped.length > 0 ? mapped : GROK_VOICES;
   } catch {
@@ -216,34 +273,31 @@ async function synthesizeGrok(
   }
 
   const clipped = text.slice(0, 14000);
-  const res = await fetch(GROK_TTS_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${settings.grokApiKey.trim()}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      text: clipped,
-      voice_id: settings.grokVoiceId || "eve",
-      language: settings.grokLanguage || "zh",
-      output_format: {
-        codec: "mp3",
-        sample_rate: 24000,
-        bit_rate: 128000,
+  const speed = clampGrokSpeed(settings.speed);
+  const url = `${grokBase(settings)}/v1/tts`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${settings.grokApiKey.trim()}`,
+        "Content-Type": "application/json",
       },
-    }),
-  });
+      body: JSON.stringify({
+        text: clipped,
+        voice_id: settings.grokVoiceId || "eve",
+        language: settings.grokLanguage || "zh",
+        speed,
+      }),
+    });
+  } catch (err) {
+    throw networkHint(err);
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    let msg = `Grok TTS 请求失败 (${res.status})`;
-    try {
-      const j = JSON.parse(errText);
-      msg = j.error?.message || j.message || msg;
-    } catch {
-      if (errText) msg = errText.slice(0, 200);
-    }
-    throw new Error(msg);
+    throw new Error(parseGrokError(res.status, errText));
   }
 
   const contentType = res.headers.get("content-type") || "";
@@ -258,6 +312,40 @@ async function synthesizeGrok(
   }
 
   return res.arrayBuffer();
+}
+
+export async function testGrokConnection(
+  settings: Pick<
+    AppSettings,
+    "grokApiKey" | "grokApiBase" | "grokVoiceId" | "grokLanguage"
+  >,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!settings.grokApiKey?.trim()) {
+    return { ok: false, error: "请先填写 Grok / xAI API Key" };
+  }
+  try {
+    const res = await fetch(`${grokBase(settings)}/v1/tts`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${settings.grokApiKey.trim()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: "连接测试。",
+        voice_id: settings.grokVoiceId || "eve",
+        language: settings.grokLanguage || "zh",
+        speed: 1,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      return { ok: false, error: parseGrokError(res.status, errText) };
+    }
+    await res.arrayBuffer().catch(() => undefined);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: networkHint(err).message };
+  }
 }
 
 export async function synthesizeSpeech(

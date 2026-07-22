@@ -11,7 +11,7 @@ import {
   TTS_PROVIDER_OPTIONS,
 } from "@/lib/types";
 import { loadSettings, saveSettings } from "@/lib/settings";
-import { fetchGrokVoices, fetchMiniMaxVoices } from "@/lib/tts";
+import { fetchGrokVoices, fetchMiniMaxVoices, testGrokConnection } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
 import { pushSettings } from "@/lib/sync";
 
@@ -28,6 +28,8 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -49,6 +51,8 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
           ...s,
           ttsProvider: "grok",
           grokVoiceId: s.grokVoiceId || "eve",
+          // Grok only supports 0.7–1.5
+          speed: Math.min(1.5, Math.max(0.7, s.speed || 1)),
         };
       }
       setVoices(FALLBACK_VOICES);
@@ -66,7 +70,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
     setMessage("");
     try {
       if (settings.ttsProvider === "grok") {
-        const list = await fetchGrokVoices(settings.grokApiKey);
+        const list = await fetchGrokVoices(settings);
         setVoices(list);
         setMessage(`已加载 ${list.length} 个 Grok 语音`);
         if (
@@ -93,6 +97,19 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
       );
     } finally {
       setLoadingVoices(false);
+    }
+  }
+
+  async function handleTestGrok() {
+    setTesting(true);
+    setError("");
+    setMessage("");
+    const result = await testGrokConnection(settings);
+    setTesting(false);
+    if (result.ok) {
+      setMessage("Grok 连接成功，可以开始朗读。");
+    } else {
+      setError(result.error);
     }
   }
 
@@ -160,9 +177,33 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                   autoComplete="off"
                 />
                 <small>
-                  在 console.x.ai → API Keys 创建。浏览器直连 xAI TTS。
+                  在 console.x.ai → API Keys 创建。国内若连不上，请开代理或填写下方反向代理。
                 </small>
               </label>
+
+              <label className="field">
+                <span>API 地址（可选反向代理）</span>
+                <input
+                  type="url"
+                  value={settings.grokApiBase}
+                  onChange={(e) =>
+                    setSettings((s) => ({ ...s, grokApiBase: e.target.value }))
+                  }
+                  placeholder="https://api.x.ai"
+                />
+                <small>默认 https://api.x.ai，可改为你自己的代理前缀</small>
+              </label>
+
+              <div className="field-row" style={{ marginBottom: "0.35rem" }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => void handleTestGrok()}
+                  disabled={testing || !settings.grokApiKey.trim()}
+                >
+                  {testing ? "测试中…" : "测试 Grok 连接"}
+                </button>
+              </div>
 
               <label className="field">
                 <span>朗读语言</span>
@@ -212,6 +253,23 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                   ))}
                 </select>
               </div>
+
+              <label className="field">
+                <span>语速：{settings.speed.toFixed(1)}x（Grok 范围 0.7–1.5）</span>
+                <input
+                  type="range"
+                  min={0.7}
+                  max={1.5}
+                  step={0.1}
+                  value={Math.min(1.5, Math.max(0.7, settings.speed || 1))}
+                  onChange={(e) =>
+                    setSettings((s) => ({
+                      ...s,
+                      speed: Number(e.target.value),
+                    }))
+                  }
+                />
+              </label>
             </>
           ) : (
             <>
