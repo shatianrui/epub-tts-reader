@@ -1,5 +1,8 @@
 import type { AppSettings, VoiceOption } from "./types";
-import { FALLBACK_VOICES } from "./types";
+import { FALLBACK_VOICES, GROK_VOICES } from "./types";
+
+const GROK_TTS_URL = "https://api.x.ai/v1/tts";
+const GROK_VOICES_URL = "https://api.x.ai/v1/tts/voices";
 
 export function hexToArrayBuffer(hex: string): ArrayBuffer {
   const clean = hex.replace(/\s/g, "");
@@ -20,7 +23,7 @@ function buildUrl(apiBase: string, path: string, groupId?: string) {
   return url.toString();
 }
 
-export async function fetchVoices(
+export async function fetchMiniMaxVoices(
   settings: Pick<AppSettings, "apiKey" | "apiBase" | "groupId">,
 ): Promise<VoiceOption[]> {
   if (!settings.apiKey?.trim()) {
@@ -92,15 +95,58 @@ export async function fetchVoices(
   }
 }
 
-export async function synthesizeSpeech(
+export async function fetchGrokVoices(
+  apiKey: string,
+): Promise<VoiceOption[]> {
+  if (!apiKey.trim()) {
+    return GROK_VOICES;
+  }
+
+  try {
+    const res = await fetch(GROK_VOICES_URL, {
+      headers: {
+        Authorization: `Bearer ${apiKey.trim()}`,
+      },
+    });
+    if (!res.ok) return GROK_VOICES;
+
+    const json = await res.json();
+    const list = Array.isArray(json)
+      ? json
+      : Array.isArray(json.voices)
+        ? json.voices
+        : [];
+
+    if (list.length === 0) return GROK_VOICES;
+
+    const mapped: VoiceOption[] = list.map(
+      (v: { voice_id?: string; id?: string; name?: string; description?: string }) => ({
+        voice_id: v.voice_id || v.id || "",
+        voice_name: v.name || v.voice_id || v.id,
+        description: v.description ? [v.description] : undefined,
+        category: "grok" as const,
+      }),
+    ).filter((v: VoiceOption) => Boolean(v.voice_id));
+
+    return mapped.length > 0 ? mapped : GROK_VOICES;
+  } catch {
+    return GROK_VOICES;
+  }
+}
+
+/** @deprecated use fetchMiniMaxVoices / fetchGrokVoices */
+export async function fetchVoices(
+  settings: Pick<AppSettings, "apiKey" | "apiBase" | "groupId">,
+): Promise<VoiceOption[]> {
+  return fetchMiniMaxVoices(settings);
+}
+
+async function synthesizeMiniMax(
   text: string,
   settings: AppSettings,
 ): Promise<ArrayBuffer> {
   if (!settings.apiKey?.trim()) {
     throw new Error("请先在设置中填写 MiniMax Token Plan API Key");
-  }
-  if (!text?.trim()) {
-    throw new Error("朗读文本为空");
   }
 
   const clipped = text.slice(0, 9000);
@@ -159,4 +205,78 @@ export async function synthesizeSpeech(
   }
 
   return hexToArrayBuffer(audioHex);
+}
+
+async function synthesizeGrok(
+  text: string,
+  settings: AppSettings,
+): Promise<ArrayBuffer> {
+  if (!settings.grokApiKey?.trim()) {
+    throw new Error("请先在设置中填写 Grok / xAI API Key");
+  }
+
+  const clipped = text.slice(0, 14000);
+  const res = await fetch(GROK_TTS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${settings.grokApiKey.trim()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: clipped,
+      voice_id: settings.grokVoiceId || "eve",
+      language: settings.grokLanguage || "zh",
+      output_format: {
+        codec: "mp3",
+        sample_rate: 24000,
+        bit_rate: 128000,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    let msg = `Grok TTS 请求失败 (${res.status})`;
+    try {
+      const j = JSON.parse(errText);
+      msg = j.error?.message || j.message || msg;
+    } catch {
+      if (errText) msg = errText.slice(0, 200);
+    }
+    throw new Error(msg);
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const json = await res.json();
+    const b64 = json.audio || json.data?.audio;
+    if (!b64) throw new Error("Grok TTS 未返回音频数据");
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  return res.arrayBuffer();
+}
+
+export async function synthesizeSpeech(
+  text: string,
+  settings: AppSettings,
+): Promise<ArrayBuffer> {
+  if (!text?.trim()) {
+    throw new Error("朗读文本为空");
+  }
+
+  if (settings.ttsProvider === "grok") {
+    return synthesizeGrok(text, settings);
+  }
+  return synthesizeMiniMax(text, settings);
+}
+
+export function activeApiKeyConfigured(settings: AppSettings): boolean {
+  if (settings.ttsProvider === "grok") {
+    return Boolean(settings.grokApiKey?.trim());
+  }
+  return Boolean(settings.apiKey?.trim());
 }

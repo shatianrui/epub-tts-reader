@@ -5,6 +5,7 @@ import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { deleteBook, getProgress, listBooks, saveBook } from "@/lib/db";
 import { parseEpub } from "@/lib/epub";
 import { loadSettings } from "@/lib/settings";
+import { activeApiKeyConfigured } from "@/lib/tts";
 import { Reader } from "@/components/Reader";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { AuthPanel } from "@/components/AuthPanel";
@@ -308,8 +309,8 @@ export function AppShell() {
               配置 API / 语音
             </button>
           </div>
-          {!settings.apiKey && (
-            <p className="hero-hint">尚未配置 API Key，朗读前请先完成设置。</p>
+          {!activeApiKeyConfigured(settings) && (
+            <p className="hero-hint">尚未配置语音 API Key，朗读前请先完成设置。</p>
           )}
         </div>
       </header>

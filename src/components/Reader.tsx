@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
-import { synthesizeSpeech } from "@/lib/tts";
+import { activeApiKeyConfigured, synthesizeSpeech } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
 import { pushProgress } from "@/lib/sync";
 import {
@@ -161,8 +161,12 @@ export function Reader({
 
   const playFrom = useCallback(
     async (startChapter: number, startParagraph: number) => {
-      if (!settings.apiKey.trim()) {
-        setError("请先在设置中填写 MiniMax Token Plan API Key");
+      if (!activeApiKeyConfigured(settings)) {
+        setError(
+          settings.ttsProvider === "grok"
+            ? "请先在设置中填写 Grok / xAI API Key"
+            : "请先在设置中填写 MiniMax Token Plan API Key",
+        );
         onOpenSettings();
         return;
       }
@@ -429,6 +433,8 @@ export function Reader({
     };
   }, [persist]);
 
+  const playLabel = playing ? (loading ? "合成中" : "暂停") : "播放";
+
   return (
     <div className="reader">
       <header className="reader-bar">
@@ -439,9 +445,20 @@ export function Reader({
           <strong>{book.title}</strong>
           <span>{book.author}</span>
         </div>
-        <button type="button" className="text-btn" onClick={onOpenSettings}>
-          设置
-        </button>
+        <div className="reader-bar-actions">
+          <button
+            type="button"
+            className="btn-play-compact"
+            onClick={handleToggle}
+            disabled={loading && !playing}
+            aria-label={playLabel}
+          >
+            {playing ? (loading ? "…" : "⏸") : "▶"}
+          </button>
+          <button type="button" className="text-btn" onClick={onOpenSettings}>
+            设置
+          </button>
+        </div>
       </header>
 
       <div className="reader-toolbar">
@@ -457,7 +474,7 @@ export function Reader({
           ))}
         </select>
 
-        <div className="player-controls">
+        <div className="player-controls desktop-only">
           <button
             type="button"
             className="btn-secondary"
@@ -504,40 +521,96 @@ export function Reader({
         {chapter?.paragraphs.map((para, i) => {
           const active = i === paragraphIndex;
           return (
-            <p
+            <div
               key={`${chapter.id}-${i}`}
               id={`para-${chapterIndex}-${i}`}
-              className={active ? "paragraph is-active" : "paragraph"}
-              onClick={() => handleParagraphClick(i)}
-              title={
-                active
-                  ? playing
-                    ? "点击暂停"
-                    : "点击继续朗读"
-                  : "点击从此段开始朗读"
-              }
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  handleParagraphClick(i);
-                }
-              }}
-              aria-pressed={active ? playing : undefined}
-              aria-label={
-                active
-                  ? playing
-                    ? "当前段落，点击暂停"
-                    : "当前段落，点击继续朗读"
-                  : `第 ${i + 1} 段，点击从此处朗读`
+              className={
+                active ? "paragraph-row is-active" : "paragraph-row"
               }
             >
-              {para}
-            </p>
+              <p
+                className="paragraph"
+                onClick={() => handleParagraphClick(i)}
+                title={
+                  active
+                    ? playing
+                      ? "点击暂停"
+                      : "点击继续朗读"
+                    : "点击从此段开始朗读"
+                }
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    handleParagraphClick(i);
+                  }
+                }}
+                aria-pressed={active ? playing : undefined}
+                aria-label={
+                  active
+                    ? playing
+                      ? "当前段落，点击暂停"
+                      : "当前段落，点击继续朗读"
+                    : `第 ${i + 1} 段，点击从此处朗读`
+                }
+              >
+                {para}
+              </p>
+              {active && (
+                <button
+                  type="button"
+                  className="para-play-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleToggle();
+                  }}
+                  aria-label={playLabel}
+                >
+                  {playing ? (loading ? "…" : "⏸") : "▶"}
+                </button>
+              )}
+            </div>
           );
         })}
       </article>
+
+      <div className="reader-dock" role="toolbar" aria-label="播放控制">
+        <button
+          type="button"
+          className="dock-btn"
+          onClick={() => handleChapterChange(Math.max(0, chapterIndex - 1))}
+          disabled={chapterIndex <= 0}
+        >
+          上一章
+        </button>
+        <button
+          type="button"
+          className={`dock-play ${playing ? "is-playing" : ""}`}
+          onClick={handleToggle}
+          disabled={loading && !playing}
+          aria-label={playLabel}
+        >
+          <span className="dock-play-icon">
+            {playing ? (loading ? "…" : "⏸") : "▶"}
+          </span>
+          <span className="dock-play-text">
+            {playing ? (loading ? "合成中" : "暂停") : "播放"}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="dock-btn"
+          onClick={() =>
+            handleChapterChange(
+              Math.min(book.chapters.length - 1, chapterIndex + 1),
+            )
+          }
+          disabled={chapterIndex >= book.chapters.length - 1}
+        >
+          下一章
+        </button>
+      </div>
     </div>
   );
 }
