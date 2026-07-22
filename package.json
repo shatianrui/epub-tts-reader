@@ -5,10 +5,18 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:mobile": "next build && cap sync android",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android",
+    "android:debug": "cd android && ./gradlew assembleDebug",
+    "android:release": "cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
     "@supabase/supabase-js": "^2.110.8",
     "idb": "^8.0.3",
     "jszip": "^3.10.1",
