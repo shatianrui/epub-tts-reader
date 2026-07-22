@@ -9,6 +9,8 @@ const SILENT_WAV =
 export type PreparedAudio = {
   kind: "raw";
   buffer: ArrayBuffer;
+  /** Accurate duration in seconds when decode succeeds. */
+  durationSec?: number;
 };
 
 export type MediaSessionHandlers = {
@@ -94,9 +96,27 @@ export class MobileAudioPlayer {
     settle?.(reason);
   }
 
-  /** Keep original bytes for HTMLAudioElement (background-safe) playback. */
+  /** Keep original bytes for HTMLAudioElement; decode for accurate duration. */
   async prepare(buffer: ArrayBuffer): Promise<PreparedAudio> {
-    return { kind: "raw", buffer };
+    let durationSec: number | undefined;
+    try {
+      const Win = window as AudioWindow;
+      const AC = window.AudioContext || Win.webkitAudioContext;
+      if (AC) {
+        const ctx = new AC();
+        try {
+          const decoded = await ctx.decodeAudioData(buffer.slice(0));
+          if (decoded.duration > 0 && Number.isFinite(decoded.duration)) {
+            durationSec = decoded.duration;
+          }
+        } finally {
+          await ctx.close().catch(() => undefined);
+        }
+      }
+    } catch {
+      /* keep duration unknown — rely on element events */
+    }
+    return { kind: "raw", buffer, durationSec };
   }
 
   async playPrepared(prepared: PreparedAudio): Promise<void> {
@@ -121,29 +141,114 @@ export class MobileAudioPlayer {
     this.element.src = this.objectUrl;
     this.element.load();
 
+    const el = this.element;
+    const knownDuration = prepared.durationSec ?? 0;
+
     const outcome = await new Promise<"ended" | "stopped" | "error">(
       (resolve, reject) => {
-        const el = this.element!;
-        const onEnded = () => this.finishPlayback("ended");
-        const onError = () => this.finishPlayback("error");
+        let lastTime = 0;
+        let stallTicks = 0;
+        let finished = false;
 
-        this.settleCurrent = (reason) => {
+        const cleanup = () => {
           el.removeEventListener("ended", onEnded);
           el.removeEventListener("error", onError);
+          el.removeEventListener("timeupdate", onTimeUpdate);
+          window.clearInterval(watchdog);
+        };
+
+        const done = (reason: "ended" | "stopped" | "error") => {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          this.settleCurrent = null;
           resolve(reason);
         };
 
+        this.settleCurrent = (reason) => done(reason);
+
+        const onEnded = () => {
+          if (token !== this.playToken) {
+            done("stopped");
+            return;
+          }
+          // Some browsers fire `ended` a bit early for MP3 blobs from TTS.
+          // If we still have meaningful audio left, resume instead of cutting.
+          const duration = Number.isFinite(el.duration) && el.duration > 0
+            ? Math.max(el.duration, knownDuration)
+            : knownDuration;
+          if (duration > 0 && duration - el.currentTime > 0.18) {
+            try {
+              // Nudge past glitch and continue
+              el.currentTime = Math.min(el.currentTime + 0.01, duration - 0.05);
+            } catch {
+              /* ignore seek errors */
+            }
+            void el.play().catch(() => done("ended"));
+            return;
+          }
+          // Tiny tail delay so the last syllable is not clipped by next src swap
+          window.setTimeout(() => {
+            if (token !== this.playToken) {
+              done("stopped");
+              return;
+            }
+            done("ended");
+          }, 120);
+        };
+
+        const onError = () => done("error");
+
+        const onTimeUpdate = () => {
+          if (token !== this.playToken) return;
+          lastTime = el.currentTime;
+          if (knownDuration > 0 && el.currentTime >= knownDuration - 0.05) {
+            // Reached decoded end — wait briefly for natural ended, else finish
+            stallTicks = 0;
+          }
+        };
+
+        const watchdog = window.setInterval(() => {
+          if (token !== this.playToken) {
+            done("stopped");
+            return;
+          }
+          if (finished || el.paused) return;
+
+          const duration = Number.isFinite(el.duration) && el.duration > 0
+            ? Math.max(el.duration, knownDuration)
+            : knownDuration;
+
+          if (duration > 0) {
+            // Hard ceiling: never hang forever past true length
+            if (el.currentTime >= duration - 0.03) {
+              stallTicks += 1;
+              // ~150ms of being at the tail without ended → finish
+              if (stallTicks >= 3) {
+                done("ended");
+              }
+              return;
+            }
+
+            // Progressing normally
+            if (el.currentTime + 0.01 >= lastTime) {
+              stallTicks = 0;
+            }
+          }
+        }, 50);
+
         el.addEventListener("ended", onEnded);
         el.addEventListener("error", onError);
+        el.addEventListener("timeupdate", onTimeUpdate);
 
         void el.play().catch((err: unknown) => {
           if (token !== this.playToken) {
-            this.finishPlayback("stopped");
+            done("stopped");
             return;
           }
-          el.removeEventListener("ended", onEnded);
-          el.removeEventListener("error", onError);
+          cleanup();
           this.settleCurrent = null;
+          finished = true;
           reject(normalizePlayError(err));
         });
       },
