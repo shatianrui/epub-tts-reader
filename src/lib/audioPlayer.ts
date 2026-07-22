@@ -27,6 +27,10 @@ export type PreparedAudio = {
   buffer: ArrayBuffer;
   durationSec?: number;
   mimeType: string;
+} | {
+  kind: "sequence";
+  parts: Exclude<PreparedAudio, { kind: "sequence" }>[];
+  durationSec: number;
 };
 
 export type PrepareInput = {
@@ -81,6 +85,8 @@ export class MobileAudioPlayer {
   private objectUrl: string | null = null;
   private unlocked = false;
   private playToken = 0;
+  /** Bumped by stop() so in-flight sequence loops exit. */
+  private generation = 0;
   private settleCurrent: ((reason: "ended" | "stopped" | "error") => void) | null =
     null;
   private visibilityHandler: (() => void) | null = null;
@@ -157,14 +163,34 @@ export class MobileAudioPlayer {
     settle?.(reason);
   }
 
-  async prepare(input: ArrayBuffer | PrepareInput): Promise<PreparedAudio> {
+  async prepare(
+    input: ArrayBuffer | PrepareInput | Array<PrepareInput | ArrayBuffer>,
+  ): Promise<PreparedAudio> {
+    if (Array.isArray(input)) {
+      const parts: Exclude<PreparedAudio, { kind: "sequence" }>[] = [];
+      for (const item of input) {
+        const prepared = await this.prepare(item);
+        if (prepared.kind === "sequence") {
+          parts.push(...prepared.parts);
+        } else {
+          parts.push(prepared);
+        }
+      }
+      const durationSec = parts.reduce(
+        (sum, p) => sum + (p.durationSec || 0),
+        0,
+      );
+      return { kind: "sequence", parts, durationSec };
+    }
+
     const buffer = input instanceof ArrayBuffer ? input : input.buffer;
     const hintDuration =
       input instanceof ArrayBuffer ? undefined : input.durationSec;
     const mimeType =
       (input instanceof ArrayBuffer ? undefined : input.mimeType) ||
       "audio/mpeg";
-    const byteEstimate = estimateMp3DurationSec(buffer);
+    const isWav = /wav|wave/i.test(mimeType);
+    const byteEstimate = isWav ? 0 : estimateMp3DurationSec(buffer);
     const AC = getAudioContextConstructor();
     if (!AC) {
       return {
@@ -184,12 +210,11 @@ export class MobileAudioPlayer {
 
     try {
       const decoded = await this.ctx.decodeAudioData(buffer.slice(0));
-      // Use the longest credible estimate — decodeAudioData can trim
-      // encoder padding and under-report; API duration is authoritative.
+      // Prefer API duration when present; never trust Infinity from Safari blobs.
       const durationSec = Math.max(
+        hintDuration || 0,
         decoded.duration,
         byteEstimate,
-        hintDuration || 0,
       );
       return {
         kind: "decoded",
@@ -215,19 +240,144 @@ export class MobileAudioPlayer {
       );
     }
 
+    if (prepared.kind === "sequence") {
+      const gen = this.generation;
+      for (let i = 0; i < prepared.parts.length; i++) {
+        if (this.generation !== gen) return;
+        await this.playPrepared(prepared.parts[i]);
+        if (this.generation !== gen) return;
+        if (i < prepared.parts.length - 1) {
+          await new Promise<void>((r) => setTimeout(r, 120));
+        }
+      }
+      return;
+    }
+
     this.finishPlayback("stopped");
     const token = ++this.playToken;
+    const knownDuration = prepared.durationSec ?? 0;
+
+    // Prefer Web Audio for decoded WAV/MP3 — Safari blob HTMLAudio often
+    // reports duration=Infinity and fires ended early.
+    if (prepared.kind === "decoded" && this.ctx) {
+      const ok = await this.playDecodedWithGate(
+        prepared.audioBuffer,
+        knownDuration,
+        token,
+      );
+      if (ok) return;
+    }
 
     const raw =
       prepared.kind === "decoded" ? prepared.raw : prepared.buffer;
-    const knownDuration = prepared.durationSec ?? 0;
-
     await this.playHtmlWithGate(
       raw,
       knownDuration,
       prepared.mimeType || "audio/mpeg",
       token,
     );
+  }
+
+  /**
+   * Play a decoded buffer via AudioBufferSourceNode, but still enforce a
+   * wall-clock floor so early onended (context interrupts) cannot advance.
+   * @returns false if Web Audio path could not start (caller should fall back)
+   */
+  private async playDecodedWithGate(
+    audioBuffer: AudioBuffer,
+    knownDuration: number,
+    token: number,
+  ): Promise<boolean> {
+    if (!this.ctx || this.ctx.state === "closed") return false;
+    if (this.ctx.state === "suspended") {
+      await this.ctx.resume().catch(() => undefined);
+    }
+    if (!this.ctx || this.ctx.state !== "running") {
+      return false;
+    }
+
+    const expectedSec = Math.max(
+      knownDuration,
+      audioBuffer.duration,
+      0,
+    );
+    const startedAt = performance.now();
+
+    const outcome = await new Promise<"ended" | "stopped" | "error" | "fail">(
+      (resolve) => {
+        let finished = false;
+        let source: AudioBufferSourceNode | null = null;
+        let padTimer: number | null = null;
+        let gate = 0;
+
+        const done = (reason: "ended" | "stopped" | "error" | "fail") => {
+          if (finished) return;
+          finished = true;
+          if (padTimer != null) window.clearTimeout(padTimer);
+          window.clearInterval(gate);
+          this.settleCurrent = null;
+          if (source) {
+            try {
+              source.onended = null;
+              source.stop();
+            } catch {
+              /* ignore */
+            }
+            try {
+              source.disconnect();
+            } catch {
+              /* ignore */
+            }
+            source = null;
+          }
+          resolve(reason);
+        };
+
+        this.settleCurrent = (reason) => done(reason);
+
+        try {
+          source = this.ctx!.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(this.ctx!.destination);
+          source.onended = () => {
+            if (token !== this.playToken) {
+              done("stopped");
+              return;
+            }
+            const elapsed = (performance.now() - startedAt) / 1000;
+            const need = expectedSec * EARLY_END_RATIO;
+            if (expectedSec > 0 && elapsed < need) {
+              // Early onended — wait out the remaining wall-clock time
+              const waitMs =
+                Math.max(0, expectedSec - elapsed) * 1000 + TAIL_PAD_MS;
+              padTimer = window.setTimeout(() => done("ended"), waitMs);
+              return;
+            }
+            padTimer = window.setTimeout(() => done("ended"), TAIL_PAD_MS);
+          };
+          source.start(0);
+        } catch {
+          done("fail");
+          return;
+        }
+
+        gate = window.setInterval(() => {
+          if (token !== this.playToken) {
+            done("stopped");
+            return;
+          }
+          const elapsed = (performance.now() - startedAt) / 1000;
+          if (expectedSec > 0 && elapsed >= expectedSec + TAIL_PAD_MS / 1000) {
+            done("ended");
+          }
+        }, 80);
+      },
+    );
+
+    if (outcome === "fail") return false;
+    if (token !== this.playToken || outcome === "stopped") return true;
+    if (outcome === "error") throw new Error("音频播放失败");
+    return true;
   }
 
   private async playHtmlWithGate(
@@ -248,7 +398,9 @@ export class MobileAudioPlayer {
     el.src = this.objectUrl;
     el.load();
 
-    const byteEstimate = estimateMp3DurationSec(buffer);
+    const byteEstimate = /wav|wave/i.test(mimeType)
+      ? 0
+      : estimateMp3DurationSec(buffer);
     const startedAt = performance.now();
 
     await new Promise<void>((resolve) => {
@@ -267,6 +419,12 @@ export class MobileAudioPlayer {
     });
 
     if (token !== this.playToken) return;
+
+    // Safari quirk: blob URL duration is often Infinity — ignore it.
+    const safeElementDuration = () => {
+      const d = el.duration;
+      return Number.isFinite(d) && d > 0 && d < 60 * 60 * 6 ? d : 0;
+    };
 
     const outcome = await new Promise<"ended" | "stopped" | "error">(
       (resolve, reject) => {
@@ -295,7 +453,7 @@ export class MobileAudioPlayer {
         const expectedMs = () => {
           const floor = pickDurationFloor(
             knownDuration,
-            Number.isFinite(el.duration) ? el.duration : 0,
+            safeElementDuration(),
             byteEstimate,
           );
           return floor > 0 ? floor * 1000 : 0;
@@ -310,7 +468,6 @@ export class MobileAudioPlayer {
           const need = expectedMs();
           const elapsed = performance.now() - startedAt;
 
-          // Hard rule: never advance before the expected duration floor.
           if (need > 0 && elapsed < need * EARLY_END_RATIO) {
             if (el.paused && !el.ended) {
               void el.play().catch(() => undefined);
@@ -342,8 +499,7 @@ export class MobileAudioPlayer {
         };
 
         const onTimeUpdate = () => {
-          const dur =
-            Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
+          const dur = safeElementDuration();
           if (dur > 0 && el.currentTime >= dur - 0.08) {
             tryFinish("near-end");
           }
@@ -366,9 +522,8 @@ export class MobileAudioPlayer {
               endedSignal ||
               el.ended ||
               el.paused ||
-              (Number.isFinite(el.duration) &&
-                el.duration > 0 &&
-                el.currentTime >= el.duration - 0.15)
+              (safeElementDuration() > 0 &&
+                el.currentTime >= safeElementDuration() - 0.15)
             ) {
               done("ended");
               return;
@@ -411,6 +566,7 @@ export class MobileAudioPlayer {
   }
 
   stop(): void {
+    this.generation += 1;
     this.playToken += 1;
     this.finishPlayback("stopped");
     if (this.element) {

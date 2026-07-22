@@ -3,6 +3,9 @@ import { FALLBACK_VOICES, GROK_VOICES } from "./types";
 
 const DEFAULT_GROK_BASE = "https://api.x.ai";
 
+/** Keep Grok requests short — long Chinese paragraphs are often truncated. */
+const GROK_CHUNK_MAX_CHARS = 280;
+
 export function hexToArrayBuffer(hex: string): ArrayBuffer {
   const clean = hex.replace(/\s/g, "");
   const len = clean.length / 2;
@@ -71,6 +74,70 @@ function parseGrokError(status: number, errText: string): string {
     return "Grok 请求过于频繁，请稍后再试。";
   }
   return msg;
+}
+
+function decodeBase64Audio(b64: string): ArrayBuffer {
+  const clean = b64.replace(/\s/g, "");
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/**
+ * Split long paragraphs into sentence-sized chunks so Grok TTS does not
+ * truncate the tail of long Chinese passages.
+ */
+export function splitGrokText(text: string, maxChars = GROK_CHUNK_MAX_CHARS): string[] {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+  if (cleaned.length <= maxChars) return [cleaned];
+
+  const parts: string[] = [];
+  let buf = "";
+
+  const flush = () => {
+    const t = buf.trim();
+    if (t) parts.push(t);
+    buf = "";
+  };
+
+  const pushPiece = (piece: string) => {
+    if (!piece) return;
+    if (piece.length <= maxChars) {
+      if (!buf) {
+        buf = piece;
+        return;
+      }
+      if (buf.length + piece.length <= maxChars) {
+        buf += piece;
+        return;
+      }
+      flush();
+      buf = piece;
+      return;
+    }
+    flush();
+    for (let i = 0; i < piece.length; i += maxChars) {
+      parts.push(piece.slice(i, i + maxChars));
+    }
+  };
+
+  // Split while keeping sentence punctuation with the preceding text.
+  const re = /[^。！？；!?;\n]+[。！？；!?;\n]?/g;
+  const tokens = cleaned.match(re);
+  if (!tokens) {
+    for (let i = 0; i < cleaned.length; i += maxChars) {
+      parts.push(cleaned.slice(i, i + maxChars));
+    }
+    return parts;
+  }
+
+  for (const token of tokens) {
+    pushPiece(token);
+  }
+  flush();
+  return parts.length > 0 ? parts : [cleaned.slice(0, maxChars)];
 }
 
 export async function fetchMiniMaxVoices(
@@ -269,22 +336,68 @@ async function synthesizeMiniMax(
   }
 
   const buffer = hexToArrayBuffer(audioHex);
-  // MiniMax is configured at 128 kbps — byte estimate is a solid floor.
   const durationSec = (buffer.byteLength * 8) / 128_000;
   return { buffer, durationSec, mimeType: "audio/mpeg" };
 }
 
-async function synthesizeGrok(
+type GrokJsonPayload = {
+  audio?: string;
+  data?: { audio?: string };
+  duration?: number;
+  content_type?: string;
+  audio_timestamps?: {
+    graph_chars?: string[];
+    graph_times?: Array<[number, number] | number[]>;
+  };
+};
+
+function durationFromGrokPayload(json: GrokJsonPayload): number | undefined {
+  if (typeof json.duration === "number" && json.duration > 0) {
+    return json.duration;
+  }
+  const times = json.audio_timestamps?.graph_times;
+  if (!times || times.length === 0) return undefined;
+  let maxEnd = 0;
+  for (const pair of times) {
+    const end = Array.isArray(pair) ? Number(pair[1]) : NaN;
+    if (Number.isFinite(end) && end > maxEnd) maxEnd = end;
+  }
+  return maxEnd > 0 ? maxEnd : undefined;
+}
+
+async function synthesizeGrokChunk(
   text: string,
   settings: AppSettings,
+  usePreferred = true,
 ): Promise<SynthesizedSpeech> {
-  if (!settings.grokApiKey?.trim()) {
-    throw new Error("请先在设置中填写 Grok / xAI API Key");
-  }
-
-  const clipped = text.slice(0, 14000);
   const speed = clampGrokSpeed(settings.speed);
   const url = `${grokBase(settings)}/v1/tts`;
+
+  const body = usePreferred
+    ? {
+        text,
+        voice_id: settings.grokVoiceId || "eve",
+        language: settings.grokLanguage || "zh",
+        speed,
+        with_timestamps: true,
+        text_normalization: true,
+        output_format: {
+          codec: "wav",
+          sample_rate: 24000,
+        },
+      }
+    : {
+        text,
+        voice_id: settings.grokVoiceId || "eve",
+        language: settings.grokLanguage || "zh",
+        speed,
+        with_timestamps: true,
+        output_format: {
+          codec: "mp3",
+          sample_rate: 24000,
+          bit_rate: 128000,
+        },
+      };
 
   let res: Response;
   try {
@@ -293,46 +406,71 @@ async function synthesizeGrok(
       headers: {
         Authorization: `Bearer ${settings.grokApiKey.trim()}`,
         "Content-Type": "application/json",
+        Accept: "application/json",
       },
-      body: JSON.stringify({
-        text: clipped,
-        voice_id: settings.grokVoiceId || "eve",
-        language: settings.grokLanguage || "zh",
-        speed,
-      }),
+      body: JSON.stringify(body),
     });
   } catch (err) {
     throw networkHint(err);
   }
 
   if (!res.ok) {
+    // Retry once with MP3 if the WAV+timestamps request is rejected
+    if (usePreferred && (res.status === 400 || res.status === 422)) {
+      return synthesizeGrokChunk(text, settings, false);
+    }
     const errText = await res.text().catch(() => "");
     throw new Error(parseGrokError(res.status, errText));
   }
 
   const contentType = res.headers.get("content-type") || "";
+
   if (contentType.includes("application/json")) {
-    const json = await res.json();
+    const json = (await res.json()) as GrokJsonPayload;
     const b64 = json.audio || json.data?.audio;
     if (!b64) throw new Error("Grok TTS 未返回音频数据");
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const durationSec =
-      typeof json.duration === "number" && json.duration > 0
-        ? json.duration
-        : undefined;
+    const buffer = decodeBase64Audio(b64);
+    const durationSec = durationFromGrokPayload(json);
     const mimeType =
       typeof json.content_type === "string" && json.content_type
         ? json.content_type
-        : "audio/mpeg";
-    return { buffer: bytes.buffer, durationSec, mimeType };
+        : usePreferred
+          ? "audio/wav"
+          : "audio/mpeg";
+    return { buffer, durationSec, mimeType };
   }
 
   const mimeType = contentType.includes("audio/")
     ? contentType.split(";")[0].trim()
-    : "audio/mpeg";
+    : usePreferred
+      ? "audio/wav"
+      : "audio/mpeg";
   return { buffer: await res.arrayBuffer(), mimeType };
+}
+
+/**
+ * Grok synthesis: split long paragraphs into sentence chunks, request WAV
+ * with timestamps, and return one clip per chunk so the player can finish
+ * every syllable before advancing.
+ */
+async function synthesizeGrok(
+  text: string,
+  settings: AppSettings,
+): Promise<SynthesizedSpeech | SynthesizedSpeech[]> {
+  if (!settings.grokApiKey?.trim()) {
+    throw new Error("请先在设置中填写 Grok / xAI API Key");
+  }
+
+  const clipped = text.slice(0, 14000);
+  const chunks = splitGrokText(clipped);
+  const results: SynthesizedSpeech[] = [];
+
+  // Sequential to avoid 429 and keep order stable
+  for (const chunk of chunks) {
+    results.push(await synthesizeGrokChunk(chunk, settings));
+  }
+
+  return results.length === 1 ? results[0] : results;
 }
 
 export async function testGrokConnection(
@@ -350,19 +488,31 @@ export async function testGrokConnection(
       headers: {
         Authorization: `Bearer ${settings.grokApiKey.trim()}`,
         "Content-Type": "application/json",
+        Accept: "application/json",
       },
       body: JSON.stringify({
         text: "连接测试。",
         voice_id: settings.grokVoiceId || "eve",
         language: settings.grokLanguage || "zh",
         speed: 1,
+        with_timestamps: true,
+        output_format: { codec: "wav", sample_rate: 24000 },
       }),
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       return { ok: false, error: parseGrokError(res.status, errText) };
     }
-    await res.arrayBuffer().catch(() => undefined);
+    // Consume body (JSON or binary)
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const json = (await res.json()) as GrokJsonPayload;
+      if (!(json.audio || json.data?.audio)) {
+        return { ok: false, error: "Grok 返回异常：缺少音频数据" };
+      }
+    } else {
+      await res.arrayBuffer().catch(() => undefined);
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: networkHint(err).message };
@@ -372,7 +522,7 @@ export async function testGrokConnection(
 export async function synthesizeSpeech(
   text: string,
   settings: AppSettings,
-): Promise<SynthesizedSpeech> {
+): Promise<SynthesizedSpeech | SynthesizedSpeech[]> {
   if (!text?.trim()) {
     throw new Error("朗读文本为空");
   }

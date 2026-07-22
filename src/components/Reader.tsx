@@ -178,6 +178,7 @@ export function Reader({
       const stillActive = () =>
         playingRef.current && sessionRef.current === session;
 
+      player.stop();
       clearPrefetch();
       playingRef.current = true;
       setPlaying(true);

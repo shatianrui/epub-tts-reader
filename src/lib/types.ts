@@ -133,7 +133,7 @@ export const FALLBACK_VOICES: VoiceOption[] = [
   },
 ];
 
-/** Built-in Grok TTS voices (flagship roster). */
+/** Built-in Grok TTS voices (common roster; API refresh may add more). */
 export const GROK_VOICES: VoiceOption[] = [
   {
     voice_id: "eve",
@@ -163,72 +163,6 @@ export const GROK_VOICES: VoiceOption[] = [
     voice_id: "sal",
     voice_name: "Sal",
     description: ["中性多用途"],
-    category: "grok",
-  },
-  {
-    voice_id: "luna",
-    voice_name: "Luna",
-    description: ["柔和共情"],
-    category: "grok",
-  },
-  {
-    voice_id: "lumen",
-    voice_name: "Lumen",
-    description: ["明亮清晰"],
-    category: "grok",
-  },
-  {
-    voice_id: "carina",
-    voice_name: "Carina",
-    description: ["客服/支持向"],
-    category: "grok",
-  },
-  {
-    voice_id: "orion",
-    voice_name: "Orion",
-    description: ["叙事感"],
-    category: "grok",
-  },
-  {
-    voice_id: "atlas",
-    voice_name: "Atlas",
-    description: ["稳重可靠"],
-    category: "grok",
-  },
-  {
-    voice_id: "castor",
-    voice_name: "Castor",
-    description: ["角色向"],
-    category: "grok",
-  },
-  {
-    voice_id: "naksh",
-    voice_name: "Naksh",
-    description: ["表现力强"],
-    category: "grok",
-  },
-  {
-    voice_id: "helix",
-    voice_name: "Helix",
-    description: ["现代感"],
-    category: "grok",
-  },
-  {
-    voice_id: "zagan",
-    voice_name: "Zagan",
-    description: ["有力男声"],
-    category: "grok",
-  },
-  {
-    voice_id: "wellness",
-    voice_name: "Wellness",
-    description: ["舒缓疗愈"],
-    category: "grok",
-  },
-  {
-    voice_id: "support",
-    voice_name: "Support",
-    description: ["耐心客服"],
     category: "grok",
   },
 ];
