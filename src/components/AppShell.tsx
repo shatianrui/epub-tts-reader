@@ -7,7 +7,7 @@ import { parseEpub } from "@/lib/epub";
 import { loadSettings } from "@/lib/settings";
 import { Reader } from "@/components/Reader";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import { AuthModal } from "@/components/AuthModal";
+import { AuthPanel } from "@/components/AuthPanel";
 import { useAuth } from "@/lib/auth";
 import { syncAll, uploadBook, removeBookFromCloud } from "@/lib/sync";
 
@@ -21,7 +21,7 @@ function formatDate(ts: number) {
 }
 
 export function AppShell() {
-  const { user, isLoading: authLoading, signOut } = useAuth();
+  const { user, isLoading: authLoading, signOut, configured } = useAuth();
   const [books, setBooks] = useState<StoredBook[]>([]);
   const [progressMap, setProgressMap] = useState<
     Record<string, ReadingProgress>
@@ -201,7 +201,7 @@ export function AppShell() {
           onClose={() => setSettingsOpen(false)}
           onSaved={(s) => setSettings(s)}
         />
-        <AuthModal
+        <AuthPanel
           open={authModalOpen}
           onClose={() => setAuthModalOpen(false)}
           initialMode={authModalMode}
@@ -219,7 +219,11 @@ export function AppShell() {
             <p className="brand">听页 ListenPage</p>
             <div className="user-area">
               {syncMessage && <span className="sync-message">{syncMessage}</span>}
-              {authLoading ? (
+              {!configured ? (
+                <span className="user-loading" title="未配置 NEXT_PUBLIC_SUPABASE_URL">
+                  云端未配置
+                </span>
+              ) : authLoading ? (
                 <span className="user-loading">加载中…</span>
               ) : user ? (
                 <div className="user-menu">
@@ -441,7 +445,7 @@ export function AppShell() {
         onClose={() => setSettingsOpen(false)}
         onSaved={(s) => setSettings(s)}
       />
-      <AuthModal
+      <AuthPanel
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
         initialMode={authModalMode}

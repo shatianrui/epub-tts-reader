@@ -1,22 +1,35 @@
 "use client";
 
-import { createBrowserClient } from "@supabase/auth-helpers-nextjs";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-export function createClient() {
-  return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+export function isSupabaseConfigured(): boolean {
+  return Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   );
 }
 
-let clientInstance: ReturnType<typeof createBrowserClient> | null = null;
+let clientInstance: SupabaseClient | null = null;
 
-export function getSupabase() {
+export function getSupabase(): SupabaseClient {
   if (typeof window === "undefined") {
     throw new Error("getSupabase() can only be called on the client side");
   }
+  if (!isSupabaseConfigured()) {
+    throw new Error("未配置 Supabase 环境变量");
+  }
   if (!clientInstance) {
-    clientInstance = createClient();
+    clientInstance = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
+      },
+    );
   }
   return clientInstance;
 }

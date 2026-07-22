@@ -10,7 +10,7 @@ import {
 import { loadSettings, saveSettings } from "@/lib/settings";
 import { fetchVoices } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
-import { uploadSettings } from "@/lib/sync";
+import { pushSettings } from "@/lib/sync";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -60,7 +60,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
     saveSettings(settings);
     onSaved?.(settings);
     if (user) {
-      void uploadSettings(settings);
+      void pushSettings(settings);
     }
     setMessage("设置已保存");
     setTimeout(() => onClose(), 400);

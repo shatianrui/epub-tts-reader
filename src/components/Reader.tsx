@@ -5,7 +5,7 @@ import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
 import { synthesizeSpeech } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
-import { uploadProgress } from "@/lib/sync";
+import { pushProgress } from "@/lib/sync";
 import {
   MobileAudioPlayer,
   normalizePlayError,
@@ -91,6 +91,8 @@ export function Reader({
     prefetchRef.current.clear();
   }, []);
 
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const persist = useCallback(
     async (c: number, p: number) => {
       const progress = {
@@ -101,7 +103,10 @@ export function Reader({
       };
       await saveProgress(progress);
       if (user) {
-        void uploadProgress(progress);
+        if (progressTimerRef.current) clearTimeout(progressTimerRef.current);
+        progressTimerRef.current = setTimeout(() => {
+          void pushProgress(progress);
+        }, 800);
       }
     },
     [book.id, user],
