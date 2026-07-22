@@ -10,7 +10,7 @@ import {
   MODEL_OPTIONS,
   TTS_PROVIDER_OPTIONS,
 } from "@/lib/types";
-import { loadSettings, saveSettings } from "@/lib/settings";
+import { loadSettings, maskApiKey, saveSettings } from "@/lib/settings";
 import { fetchGrokVoices, fetchMiniMaxVoices, testGrokConnection } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
 import { pushSettings } from "@/lib/sync";
@@ -21,6 +21,65 @@ interface SettingsPanelProps {
   onSaved?: (settings: AppSettings) => void;
 }
 
+function ApiKeyField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+  savedHint,
+  inputName,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  hint: string;
+  savedHint: string;
+  inputName: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [unlocked, setUnlocked] = useState(false);
+
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <div className="api-key-row">
+        <input
+          type={visible ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setUnlocked(true)}
+          readOnly={!unlocked}
+          placeholder={placeholder}
+          name={inputName}
+          id={inputName}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-form-type="other"
+          data-bwignore="true"
+        />
+        <button
+          type="button"
+          className="text-btn api-key-toggle"
+          onClick={() => setVisible((v) => !v)}
+        >
+          {visible ? "隐藏" : "显示"}
+        </button>
+      </div>
+      <small>
+        {hint}
+        <br />
+        本地已存：{savedHint}
+      </small>
+    </label>
+  );
+}
+
 export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   const { user } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -28,19 +87,49 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-
   const [testing, setTesting] = useState(false);
+  const [storedHint, setStoredHint] = useState({ grok: "", minimax: "" });
 
   useEffect(() => {
     if (!open) return;
     const loaded = loadSettings();
     setSettings(loaded);
+    setStoredHint({
+      grok: maskApiKey(loaded.grokApiKey),
+      minimax: maskApiKey(loaded.apiKey),
+    });
     setMessage("");
     setError("");
     setVoices(
       loaded.ttsProvider === "grok" ? GROK_VOICES : FALLBACK_VOICES,
     );
+    // Re-assert after browsers attempt password autofill into the field.
+    const timer = window.setTimeout(() => {
+      const again = loadSettings();
+      setSettings(again);
+      setStoredHint({
+        grok: maskApiKey(again.grokApiKey),
+        minimax: maskApiKey(again.apiKey),
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
   }, [open]);
+
+  function persist(next: AppSettings, closeAfter = false) {
+    saveSettings(next);
+    onSaved?.(next);
+    setStoredHint({
+      grok: maskApiKey(next.grokApiKey),
+      minimax: maskApiKey(next.apiKey),
+    });
+    if (user) {
+      void pushSettings(next);
+    }
+    if (closeAfter) {
+      setMessage("设置已保存");
+      setTimeout(() => onClose(), 400);
+    }
+  }
 
   function switchProvider(provider: TtsProvider) {
     setSettings((s) => {
@@ -68,6 +157,9 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
     setLoadingVoices(true);
     setError("");
     setMessage("");
+    // Persist current key before calling API so a successful refresh
+    // doesn't get lost if the panel is closed without "保存".
+    persist(settings);
     try {
       if (settings.ttsProvider === "grok") {
         const list = await fetchGrokVoices(settings);
@@ -104,6 +196,10 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
     setTesting(true);
     setError("");
     setMessage("");
+    // Always save before testing so the key is remembered even if
+    // the user forgets to click 保存, and to avoid testing an
+    // autofilled ephemeral value that never got committed.
+    persist(settings);
     const result = await testGrokConnection(settings);
     setTesting(false);
     if (result.ok) {
@@ -114,13 +210,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   }
 
   function handleSave() {
-    saveSettings(settings);
-    onSaved?.(settings);
-    if (user) {
-      void pushSettings(settings);
-    }
-    setMessage("设置已保存");
-    setTimeout(() => onClose(), 400);
+    persist(settings, true);
   }
 
   if (!open) return null;
@@ -165,21 +255,17 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
 
           {isGrok ? (
             <>
-              <label className="field">
-                <span>Grok / xAI API Key</span>
-                <input
-                  type="password"
-                  value={settings.grokApiKey}
-                  onChange={(e) =>
-                    setSettings((s) => ({ ...s, grokApiKey: e.target.value }))
-                  }
-                  placeholder="xAI API Key"
-                  autoComplete="off"
-                />
-                <small>
-                  在 console.x.ai → API Keys 创建。国内若连不上，请开代理或填写下方反向代理。
-                </small>
-              </label>
+              <ApiKeyField
+                label="Grok / xAI API Key"
+                value={settings.grokApiKey}
+                onChange={(grokApiKey) =>
+                  setSettings((s) => ({ ...s, grokApiKey }))
+                }
+                placeholder="粘贴 xAI API Key（以 xai- 开头）"
+                hint="在 console.x.ai → API Keys 创建。国内若连不上，请开代理或填写下方反向代理。请勿依赖浏览器自动填充。"
+                savedHint={storedHint.grok}
+                inputName="epub-tts-grok-api-key"
+              />
 
               <label className="field">
                 <span>API 地址（可选反向代理）</span>
@@ -190,6 +276,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                     setSettings((s) => ({ ...s, grokApiBase: e.target.value }))
                   }
                   placeholder="https://api.x.ai"
+                  autoComplete="off"
                 />
                 <small>默认 https://api.x.ai，可改为你自己的代理前缀</small>
               </label>
@@ -273,21 +360,15 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
             </>
           ) : (
             <>
-              <label className="field">
-                <span>MiniMax Token Plan API Key</span>
-                <input
-                  type="password"
-                  value={settings.apiKey}
-                  onChange={(e) =>
-                    setSettings((s) => ({ ...s, apiKey: e.target.value }))
-                  }
-                  placeholder="Subscription Key / API Key"
-                  autoComplete="off"
-                />
-                <small>
-                  在 MiniMax 控制台 Billing → Token Plan 获取 Subscription Key
-                </small>
-              </label>
+              <ApiKeyField
+                label="MiniMax Token Plan API Key"
+                value={settings.apiKey}
+                onChange={(apiKey) => setSettings((s) => ({ ...s, apiKey }))}
+                placeholder="Subscription Key / API Key"
+                hint="在 MiniMax 控制台 Billing → Token Plan 获取 Subscription Key。请勿依赖浏览器自动填充。"
+                savedHint={storedHint.minimax}
+                inputName="epub-tts-minimax-api-key"
+              />
 
               <label className="field">
                 <span>API 节点</span>
@@ -314,6 +395,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                     setSettings((s) => ({ ...s, groupId: e.target.value }))
                   }
                   placeholder="如控制台要求则填写"
+                  autoComplete="off"
                 />
               </label>
 

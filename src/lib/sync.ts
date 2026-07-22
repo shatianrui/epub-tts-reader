@@ -8,7 +8,13 @@ import {
   getProgress,
   saveProgress as saveProgressLocal,
 } from "@/lib/db";
-import { loadSettings, saveSettings as saveSettingsLocal, getSettingsUpdatedAt } from "@/lib/settings";
+import {
+  loadSettings,
+  saveSettings as saveSettingsLocal,
+  getSettingsUpdatedAt,
+  mergeSettingsPreferLocalSecrets,
+  normalizeSettings,
+} from "@/lib/settings";
 import { parseEpub } from "@/lib/epub";
 
 const BUCKET = "epubs";
@@ -42,6 +48,7 @@ export interface SyncResult {
   booksSynced: number;
   progressSynced: number;
   settingsSynced: boolean;
+  settings?: AppSettings;
   errors: string[];
 }
 
@@ -181,16 +188,20 @@ export async function pushSettings(
   if (!userId) return { error: "用户未登录" };
 
   const supabase = getSupabase();
+  const stamp = Date.now();
+  const normalized = normalizeSettings(settings);
   const { error } = await supabase.from("user_settings").upsert(
     {
       user_id: userId,
-      settings,
-      updated_at: Date.now(),
+      settings: normalized,
+      updated_at: stamp,
     },
     { onConflict: "user_id" },
   );
 
   if (error) return { error: error.message };
+  // Keep local stamp in sync with what we just wrote to the cloud
+  saveSettingsLocal(normalized);
   return {};
 }
 
@@ -340,6 +351,7 @@ export async function syncProgress(): Promise<{
 export async function syncSettings(): Promise<{
   synced: boolean;
   errors: string[];
+  settings?: AppSettings;
 }> {
   const errors: string[] = [];
   const userId = await getCurrentUserId();
@@ -368,7 +380,7 @@ export async function syncSettings(): Promise<{
       errors.push(`同步设置失败: ${result.error}`);
       return { synced: false, errors };
     }
-    return { synced: true, errors };
+    return { synced: true, errors, settings: loadSettings() };
   }
 
   if (localStamp >= cloud.updated_at) {
@@ -377,11 +389,30 @@ export async function syncSettings(): Promise<{
       errors.push(`同步设置失败: ${result.error}`);
       return { synced: false, errors };
     }
-    return { synced: true, errors };
+    return { synced: true, errors, settings: loadSettings() };
   }
 
-  saveSettingsLocal(cloud.settings);
-  return { synced: true, errors };
+  // Cloud is newer: adopt it, but never wipe non-empty local API keys
+  // with blank cloud values (common after schema adds new key fields).
+  const merged = mergeSettingsPreferLocalSecrets(cloud.settings, localSettings);
+  saveSettingsLocal(merged);
+
+  // If we had to preserve local secrets, push the merged result back
+  // so cloud also keeps the keys.
+  const cloudHadBlankGrok =
+    !normalizeSettings(cloud.settings).grokApiKey?.trim() &&
+    Boolean(merged.grokApiKey?.trim());
+  const cloudHadBlankMiniMax =
+    !normalizeSettings(cloud.settings).apiKey?.trim() &&
+    Boolean(merged.apiKey?.trim());
+  if (cloudHadBlankGrok || cloudHadBlankMiniMax) {
+    const result = await pushSettings(merged);
+    if (result.error) {
+      errors.push(`回写密钥到云端失败: ${result.error}`);
+    }
+  }
+
+  return { synced: true, errors, settings: loadSettings() };
 }
 
 export async function syncAll(): Promise<SyncResult> {
@@ -410,9 +441,11 @@ export async function syncAll(): Promise<SyncResult> {
     );
   }
 
+  let settings: AppSettings | undefined;
   try {
     const settingsResult = await syncSettings();
     settingsSynced = settingsResult.synced;
+    settings = settingsResult.settings;
     errors.push(...settingsResult.errors);
   } catch (e) {
     errors.push(
@@ -420,7 +453,7 @@ export async function syncAll(): Promise<SyncResult> {
     );
   }
 
-  return { booksSynced, progressSynced, settingsSynced, errors };
+  return { booksSynced, progressSynced, settingsSynced, settings, errors };
 }
 
 /** pullAll alias used by plan naming */

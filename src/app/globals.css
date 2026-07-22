@@ -428,6 +428,22 @@ label {
   gap: 0.5rem;
 }
 
+.api-key-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.api-key-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.api-key-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .field input,
 .field select,
 .reader-toolbar select {

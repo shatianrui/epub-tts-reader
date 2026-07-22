@@ -73,6 +73,8 @@ export function AppShell() {
         console.warn("同步错误:", result.errors);
       }
       await refresh();
+      // Keep React settings in sync after cloud merge / secret preserve.
+      setSettings(result.settings ?? loadSettings());
     } catch (e) {
       setSyncMessage(e instanceof Error ? e.message : "同步失败");
     } finally {
