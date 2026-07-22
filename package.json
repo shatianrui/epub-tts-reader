@@ -9,8 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@supabase/auth-helpers-nextjs": "^0.15.0",
-    "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.8",
     "idb": "^8.0.3",
     "jszip": "^3.10.1",

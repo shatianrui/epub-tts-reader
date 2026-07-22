@@ -821,9 +821,16 @@ label {
 }
 
 .auth-modal h2 {
-  margin: 0 0 1.25rem;
+  margin: 0 0 0.5rem;
   font-family: var(--font-display), Georgia, serif;
   font-size: 1.4rem;
+}
+
+.auth-hint {
+  margin: 0 0 1.1rem;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .auth-providers {
