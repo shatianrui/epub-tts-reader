@@ -664,30 +664,184 @@ label {
   text-overflow: ellipsis;
 }
 
+.link-btn:hover {
+  color: var(--accent);
+}
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+.provider-chip {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 0.75rem 0.65rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+
+.provider-chip.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
 @media (max-width: 640px) {
   .hero {
-    padding-top: 1.75rem;
+    padding: calc(1rem + env(safe-area-inset-top)) 1rem 1.25rem;
+  }
+
+  .hero h1 {
+    font-size: 1.35rem;
+    max-width: none;
+  }
+
+  .hero-sub {
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+
+  .hero-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.65rem;
+  }
+
+  .hero-actions .btn-primary,
+  .hero-actions .btn-secondary,
+  .upload-label {
+    width: 100%;
+    justify-content: center;
+    min-height: 48px;
+  }
+
+  .main {
+    padding: 0 0.85rem calc(1.5rem + env(safe-area-inset-bottom));
+  }
+
+  .book-grid {
+    grid-template-columns: 1fr;
   }
 
   .book-item {
-    grid-template-columns: 60px 1fr;
+    grid-template-columns: 64px 1fr;
+    min-height: 96px;
   }
 
-  .book-cover {
-    width: 60px;
-    height: 82px;
+  .settings-overlay {
+    place-items: end center;
+    padding: 0;
+  }
+
+  .settings-panel {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 20px 20px 0 0;
+  }
+
+  .settings-body {
+    padding-bottom: 1rem;
+  }
+
+  .field input,
+  .field select,
+  .reader-toolbar select {
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .reader {
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+    padding-bottom: calc(7rem + env(safe-area-inset-bottom));
+  }
+
+  .reader-bar {
+    padding-top: calc(0.35rem + env(safe-area-inset-top));
+  }
+
+  .reader-title strong {
+    max-width: 62vw;
+    font-size: 0.95rem;
+  }
+
+  .reader-toolbar select {
+    min-height: 44px;
   }
 
   .player-controls {
-    display: grid;
-    grid-template-columns: 1fr 1.2fr 1fr;
+    display: none;
   }
 
-  .player-controls .btn-secondary,
-  .player-controls .btn-primary {
-    padding: 0.65rem 0.4rem;
-    font-size: 0.88rem;
+  .reader-content {
+    padding: 1rem 0.9rem 1.5rem;
+    font-size: 1.02rem;
+    line-height: 1.9;
   }
+
+  .reader-content h1 {
+    font-size: 1.2rem;
+  }
+
+  .paragraph {
+    padding: 0.55rem 0.5rem;
+    margin-bottom: 0.85rem;
+  }
+
+  .dock-btn {
+    width: 46px;
+    height: 46px;
+  }
+
+  .dock-play-btn {
+    width: 60px;
+    height: 60px;
+  }
+
+  .dock-meta strong {
+    font-size: 0.95rem;
+  }
+}
+
+.platform-android body,
+.platform-native body {
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.platform-android .shell {
+  min-height: 100dvh;
+}
+
+.platform-android .hero {
+  padding-top: calc(0.85rem + env(safe-area-inset-top));
+}
+
+.platform-android .reader-bar {
+  top: env(safe-area-inset-top);
+}
+
+.platform-android .reader-dock {
+  padding-bottom: calc(0.85rem + env(safe-area-inset-bottom));
+}
+
+.platform-android .btn-primary,
+.platform-android .btn-secondary,
+.platform-android .dock-btn,
+.platform-android .dock-play-btn,
+.platform-android .provider-chip {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.platform-android .settings-panel {
+  max-height: calc(100dvh - env(safe-area-inset-top));
 }
 
 .hero-top-bar {

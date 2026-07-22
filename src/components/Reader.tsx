@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { saveProgress } from "@/lib/db";
-import { synthesizeSpeech } from "@/lib/tts";
+import { synthesizeSpeech, hasConfiguredApiKey } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
 import { pushProgress } from "@/lib/sync";
 import {
@@ -164,8 +164,8 @@ export function Reader({
 
   const playFrom = useCallback(
     async (startChapter: number, startParagraph: number) => {
-      if (!settings.apiKey.trim()) {
-        setError("请先在设置中填写 MiniMax Token Plan API Key");
+      if (!hasConfiguredApiKey(settings)) {
+        setError("请先在设置中配置语音 API Key（MiniMax 或 Grok）");
         onOpenSettings();
         return;
       }

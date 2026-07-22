@@ -1,14 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AppSettings, VoiceOption } from "@/lib/types";
+import type { AppSettings, TtsProvider, VoiceOption } from "@/lib/types";
 import {
   API_BASE_OPTIONS,
-  FALLBACK_VOICES,
+  GROK_LANGUAGE_OPTIONS,
   MODEL_OPTIONS,
+  TTS_PROVIDER_OPTIONS,
+  getDefaultVoiceId,
+  getFallbackVoices,
+  getSpeedRange,
 } from "@/lib/types";
 import { loadSettings, saveSettings } from "@/lib/settings";
-import { fetchVoices } from "@/lib/tts";
+import { fetchVoices, hasConfiguredApiKey } from "@/lib/tts";
 import { useAuth } from "@/lib/auth";
 import { pushSettings } from "@/lib/sync";
 
@@ -21,18 +25,40 @@ interface SettingsPanelProps {
 export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   const { user } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
-  const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
+  const [voices, setVoices] = useState<VoiceOption[]>(
+    getFallbackVoices(loadSettings().ttsProvider),
+  );
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  const speedRange = getSpeedRange(settings.ttsProvider);
+  const isGrok = settings.ttsProvider === "grok";
+
   useEffect(() => {
     if (open) {
-      setSettings(loadSettings());
+      const loaded = loadSettings();
+      setSettings(loaded);
+      setVoices(getFallbackVoices(loaded.ttsProvider));
       setMessage("");
       setError("");
     }
   }, [open]);
+
+  function handleProviderChange(provider: TtsProvider) {
+    setSettings((current) => ({
+      ...current,
+      ttsProvider: provider,
+      voiceId: getDefaultVoiceId(provider),
+      speed: Math.min(
+        getSpeedRange(provider).max,
+        Math.max(getSpeedRange(provider).min, current.speed || 1),
+      ),
+    }));
+    setVoices(getFallbackVoices(provider));
+    setMessage("");
+    setError("");
+  }
 
   async function handleLoadVoices() {
     setLoadingVoices(true);
@@ -50,7 +76,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载语音失败");
-      setVoices(FALLBACK_VOICES);
+      setVoices(getFallbackVoices(settings.ttsProvider));
     } finally {
       setLoadingVoices(false);
     }
@@ -67,6 +93,8 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   }
 
   if (!open) return null;
+
+  const activeKey = isGrok ? settings.grokApiKey : settings.minimaxApiKey;
 
   return (
     <div className="settings-overlay" onClick={onClose}>
@@ -86,75 +114,134 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
 
         <div className="settings-body">
           <label className="field">
-            <span>MiniMax Token Plan API Key</span>
-            <input
-              type="password"
-              value={settings.apiKey}
-              onChange={(e) =>
-                setSettings((s) => ({ ...s, apiKey: e.target.value }))
-              }
-              placeholder="Subscription Key / API Key"
-              autoComplete="off"
-            />
-            <small>
-              在 MiniMax 控制台 Billing → Token Plan 获取 Subscription Key
-            </small>
-          </label>
-
-          <label className="field">
-            <span>API 节点</span>
-            <select
-              value={settings.apiBase}
-              onChange={(e) =>
-                setSettings((s) => ({ ...s, apiBase: e.target.value }))
-              }
-            >
-              {API_BASE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
+            <span>语音服务</span>
+            <div className="provider-grid">
+              {TTS_PROVIDER_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className={
+                    settings.ttsProvider === opt.value
+                      ? "provider-chip is-active"
+                      : "provider-chip"
+                  }
+                  onClick={() => handleProviderChange(opt.value)}
+                >
                   {opt.label}
-                </option>
+                </button>
               ))}
-            </select>
+            </div>
           </label>
 
-          <label className="field">
-            <span>GroupId（国内账号可选）</span>
-            <input
-              type="text"
-              value={settings.groupId}
-              onChange={(e) =>
-                setSettings((s) => ({ ...s, groupId: e.target.value }))
-              }
-              placeholder="如控制台要求则填写"
-            />
-          </label>
+          {isGrok ? (
+            <label className="field">
+              <span>Grok / xAI API Key</span>
+              <input
+                type="password"
+                value={settings.grokApiKey}
+                onChange={(e) =>
+                  setSettings((s) => ({ ...s, grokApiKey: e.target.value }))
+                }
+                placeholder="xai-..."
+                autoComplete="off"
+              />
+              <small>在 console.x.ai 获取 API Key，使用 Grok TTS 语音合成</small>
+            </label>
+          ) : (
+            <>
+              <label className="field">
+                <span>MiniMax Token Plan API Key</span>
+                <input
+                  type="password"
+                  value={settings.minimaxApiKey}
+                  onChange={(e) =>
+                    setSettings((s) => ({
+                      ...s,
+                      minimaxApiKey: e.target.value,
+                    }))
+                  }
+                  placeholder="Subscription Key / API Key"
+                  autoComplete="off"
+                />
+                <small>
+                  在 MiniMax 控制台 Billing → Token Plan 获取 Subscription Key
+                </small>
+              </label>
 
-          <label className="field">
-            <span>语音模型</span>
-            <select
-              value={settings.model}
-              onChange={(e) =>
-                setSettings((s) => ({ ...s, model: e.target.value }))
-              }
-            >
-              {MODEL_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              <label className="field">
+                <span>API 节点</span>
+                <select
+                  value={settings.apiBase}
+                  onChange={(e) =>
+                    setSettings((s) => ({ ...s, apiBase: e.target.value }))
+                  }
+                >
+                  {API_BASE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field">
+                <span>GroupId（国内账号可选）</span>
+                <input
+                  type="text"
+                  value={settings.groupId}
+                  onChange={(e) =>
+                    setSettings((s) => ({ ...s, groupId: e.target.value }))
+                  }
+                  placeholder="如控制台要求则填写"
+                />
+              </label>
+
+              <label className="field">
+                <span>语音模型</span>
+                <select
+                  value={settings.model}
+                  onChange={(e) =>
+                    setSettings((s) => ({ ...s, model: e.target.value }))
+                  }
+                >
+                  {MODEL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+
+          {isGrok && (
+            <label className="field">
+              <span>朗读语言</span>
+              <select
+                value={settings.grokLanguage}
+                onChange={(e) =>
+                  setSettings((s) => ({ ...s, grokLanguage: e.target.value }))
+                }
+              >
+                {GROK_LANGUAGE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <div className="field">
             <div className="field-row">
-              <span>朗读语音</span>
+              <span>朗读人物</span>
               <button
                 type="button"
                 className="text-btn"
                 onClick={handleLoadVoices}
-                disabled={loadingVoices || !settings.apiKey.trim()}
+                disabled={loadingVoices || !activeKey.trim()}
               >
-                {loadingVoices ? "加载中…" : "从 API 刷新语音"}
+                {loadingVoices ? "加载中…" : "刷新语音列表"}
               </button>
             </div>
             <select
@@ -166,19 +253,22 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
               {voices.map((v) => (
                 <option key={v.voice_id} value={v.voice_id}>
                   {v.voice_name || v.voice_id}
-                  {v.category !== "system" ? ` (${v.category})` : ""}
+                  {v.description?.[0] ? ` · ${v.description[0]}` : ""}
                 </option>
               ))}
             </select>
           </div>
 
           <label className="field">
-            <span>语速：{settings.speed.toFixed(1)}x</span>
+            <span>
+              语速：{settings.speed.toFixed(isGrok ? 2 : 1)}x
+              {isGrok ? "（Grok 范围 0.7–1.5）" : ""}
+            </span>
             <input
               type="range"
-              min={0.5}
-              max={2}
-              step={0.1}
+              min={speedRange.min}
+              max={speedRange.max}
+              step={speedRange.step}
               value={settings.speed}
               onChange={(e) =>
                 setSettings((s) => ({
@@ -227,7 +317,12 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
           <button type="button" className="btn-secondary" onClick={onClose}>
             取消
           </button>
-          <button type="button" className="btn-primary" onClick={handleSave}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={handleSave}
+            disabled={!hasConfiguredApiKey(settings)}
+          >
             保存
           </button>
         </footer>

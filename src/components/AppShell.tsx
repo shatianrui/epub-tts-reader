@@ -9,6 +9,7 @@ import { Reader } from "@/components/Reader";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { AuthPanel } from "@/components/AuthPanel";
 import { useAuth } from "@/lib/auth";
+import { hasConfiguredApiKey } from "@/lib/tts";
 import { syncAll, uploadBook, removeBookFromCloud } from "@/lib/sync";
 
 function formatDate(ts: number) {
@@ -283,7 +284,7 @@ export function AppShell() {
           </div>
           <h1>把 EPUB 变成可续听的有声书</h1>
           <p className="hero-sub">
-            上传电子书，接入 MiniMax Token Plan 语音合成，记住进度、随时续读。
+            上传电子书，支持 MiniMax 与 Grok TTS 语音朗读，记住进度、随时续读。
             {user && " 登录后数据将同步到云端。"}
           </p>
           <div className="hero-actions">
@@ -308,7 +309,7 @@ export function AppShell() {
               配置 API / 语音
             </button>
           </div>
-          {!settings.apiKey && (
+          {!hasConfiguredApiKey(settings) && (
             <p className="hero-hint">尚未配置 API Key，朗读前请先完成设置。</p>
           )}
         </div>
