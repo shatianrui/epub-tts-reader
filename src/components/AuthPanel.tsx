@@ -230,6 +230,3 @@ export function AuthPanel({
     </div>
   );
 }
-
-/** @deprecated alias */
-export const AuthModal = AuthPanel;
