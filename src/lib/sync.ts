@@ -178,9 +178,6 @@ export async function pushProgress(
   return {};
 }
 
-/** @deprecated use pushProgress */
-export const uploadProgress = pushProgress;
-
 export async function pushSettings(
   settings: AppSettings,
 ): Promise<{ error?: string }> {
@@ -204,9 +201,6 @@ export async function pushSettings(
   saveSettingsLocal(normalized);
   return {};
 }
-
-/** @deprecated use pushSettings */
-export const uploadSettings = pushSettings;
 
 async function pullMissingBook(
   userId: string,
@@ -455,6 +449,3 @@ export async function syncAll(): Promise<SyncResult> {
 
   return { booksSynced, progressSynced, settingsSynced, settings, errors };
 }
-
-/** pullAll alias used by plan naming */
-export const pullAll = syncAll;

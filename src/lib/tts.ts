@@ -258,13 +258,6 @@ export async function fetchGrokVoices(
   }
 }
 
-/** @deprecated use fetchMiniMaxVoices / fetchGrokVoices */
-export async function fetchVoices(
-  settings: Pick<AppSettings, "apiKey" | "apiBase" | "groupId">,
-): Promise<VoiceOption[]> {
-  return fetchMiniMaxVoices(settings);
-}
-
 export type SynthesizedSpeech = {
   buffer: ArrayBuffer;
   /** Authoritative duration from the TTS API when available. */
