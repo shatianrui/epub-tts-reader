@@ -46,13 +46,17 @@ jobs:
       # produces an UNSIGNED .app / .ipa. It cannot be installed by
       # AirDrop/`xcodebuild -exportArchive` directly — re-sign it locally
       # with a free Apple ID via Sideloadly / AltStore (or open
-      # ios/App/App.xcworkspace in Xcode and Run to a connected device,
+      # ios/App/App.xcodeproj in Xcode and Run to a connected device,
       # which signs + installs in one step instead of using this artifact).
+      #
+      # This project uses Capacitor's Swift Package Manager integration
+      # (no Podfile/CocoaPods), so there is no top-level App.xcworkspace —
+      # build the .xcodeproj directly instead.
       - name: Build unsigned .app
         working-directory: ios/App
         run: |
           xcodebuild \
-            -workspace App.xcworkspace \
+            -project App.xcodeproj \
             -scheme App \
             -configuration Release \
             -sdk iphoneos \

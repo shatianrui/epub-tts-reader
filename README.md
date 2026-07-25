@@ -119,7 +119,7 @@ npm run android:release
 ```bash
 npm install
 npm run build:ios      # 构建网页并同步到 iOS 工程
-npm run cap:open:ios   # 或手动打开 ios/App/App.xcworkspace
+npm run cap:open:ios   # 或手动打开 ios/App/App.xcodeproj
 ```
 
 在 Xcode 里用 USB 连接 iPhone，Signing & Capabilities 里用你的免费 Apple ID 登录（Personal Team），选中你的设备点 Run，会自动签名并安装到手机。
