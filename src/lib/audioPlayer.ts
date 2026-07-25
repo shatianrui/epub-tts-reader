@@ -13,7 +13,7 @@ const SILENT_WAV =
  * Covers MP3 decoder padding / early `ended` quirks so the last
  * syllables are heard before the reader advances.
  */
-const TAIL_PAD_MS = 450;
+const TAIL_PAD_MS = 200;
 
 /** Never trust an `ended` that fires before this fraction of expected duration. */
 const EARLY_END_RATIO = 0.92;
