@@ -58,28 +58,36 @@ export function AppShell() {
     if (!user) return;
     setSyncing(true);
     setSyncMessage("");
+    let messageDelay = 3000;
     try {
       const result = await syncAll();
       const parts: string[] = [];
       if (result.booksSynced > 0) parts.push(`${result.booksSynced} 本书籍`);
       if (result.progressSynced > 0) parts.push(`${result.progressSynced} 条进度`);
       if (result.settingsSynced) parts.push("设置");
-      if (parts.length > 0) {
-        setSyncMessage(`已同步 ${parts.join("、")}`);
-      } else if (result.errors.length === 0) {
-        setSyncMessage("数据已是最新");
-      }
+
+      let msg = parts.length > 0 ? `已同步 ${parts.join("、")}` : "";
       if (result.errors.length > 0) {
         console.warn("同步错误:", result.errors);
+        const errSummary =
+          result.errors.length === 1
+            ? result.errors[0]
+            : `${result.errors[0]}（还有 ${result.errors.length - 1} 项失败，详见浏览器控制台）`;
+        msg = msg ? `${msg}；${errSummary}` : errSummary;
+        messageDelay = 8000;
+      } else if (!msg) {
+        msg = "数据已是最新";
       }
+      setSyncMessage(msg);
       await refresh();
       // Keep React settings in sync after cloud merge / secret preserve.
       setSettings(result.settings ?? loadSettings());
     } catch (e) {
       setSyncMessage(e instanceof Error ? e.message : "同步失败");
+      messageDelay = 8000;
     } finally {
       setSyncing(false);
-      setTimeout(() => setSyncMessage(""), 3000);
+      setTimeout(() => setSyncMessage(""), messageDelay);
     }
   }, [user, refresh]);
 

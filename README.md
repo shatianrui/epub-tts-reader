@@ -107,3 +107,33 @@ Release 包需自行配置签名密钥，在 `android/` 目录按 [Android 官�
 ```bash
 npm run android:release
 ```
+
+## iOS
+
+同样基于 Capacitor，`ios/` 是标准 Xcode 工程。iOS 构建**必须在 macOS 上用 Xcode 完成**（苹果限制，无法在 Linux/Windows 上编译或签名）。已针对朗读场景做了后台播放配置（`UIBackgroundModes: audio` + `AVAudioSession` 设为 `.playback`），锁屏/切后台朗读不会中断。
+
+### 方式一：有 Mac，没有付费 Apple Developer 账号（个人免费签名）
+
+最简单可靠，推荐这种：
+
+```bash
+npm install
+npm run build:ios      # 构建网页并同步到 iOS 工程
+npm run cap:open:ios   # 或手动打开 ios/App/App.xcworkspace
+```
+
+在 Xcode 里用 USB 连接 iPhone，Signing & Capabilities 里用你的免费 Apple ID 登录（Personal Team），选中你的设备点 Run，会自动签名并安装到手机。
+
+**限制：** 免费签名的 App 每 7 天过期，需要重新连接 Xcode 打开工程再跑一次 Run 才能续期；同一 Apple ID 免费账号能装的 App 数量也有上限。
+
+### 方式二：没有 Mac
+
+用不到 Xcode 也能装到自己手机上，思路是让 CI 出一个**未签名**的 IPA，再用第三方工具在你自己的电脑（Windows/Mac 均可）上用免费 Apple ID 重新签名安装：
+
+1. 仓库里的 [Build iOS IPA](.github/workflows/build-ios-ipa.yml) 工作流会在 push 到 `main` 时自动跑（或在 Actions 页手动 **Run workflow**），产出 `listenpage-unsigned-ipa` 这个 Artifact（未签名 IPA，无法直接安装）。
+2. 下载后，用 [Sideloadly](https://sideloadly.io/)（或 AltStore）+ 你的免费 Apple ID，把这个未签名 IPA 重新签名并通过 USB 安装到 iPhone。
+3. 同样受限于免费签名 7 天过期，Sideloadly 支持定期重新签名刷新。
+
+### 正式签名 / 上架 App Store
+
+需要付费 Apple Developer 账号（$99/年），配置好证书、描述文件后，把 CI 里的 `CODE_SIGNING_ALLOWED=NO` 相关参数换成正式签名配置（或在 App Store Connect / TestFlight 走标准发布流程），这里不再展开。
