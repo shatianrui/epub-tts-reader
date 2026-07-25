@@ -1,3 +1,5 @@
+import { activateNativeAudioSession } from "./nativeAudioSession";
+
 type AudioWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
@@ -93,6 +95,8 @@ export class MobileAudioPlayer {
 
   /** Call synchronously inside a click/touch handler. */
   unlock(): void {
+    activateNativeAudioSession();
+
     const AC = getAudioContextConstructor();
     if (AC) {
       if (!this.ctx || this.ctx.state === "closed") {
