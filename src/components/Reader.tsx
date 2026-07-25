@@ -292,7 +292,7 @@ export function Reader({
 
           // Brief breath between paragraphs so the last syllables are never
           // overlapped by the next clip starting immediately.
-          await new Promise<void>((r) => setTimeout(r, 180));
+          await new Promise<void>((r) => setTimeout(r, 500));
           if (!stillActive()) return;
 
           const next = advancePos(book.chapters, pos);
