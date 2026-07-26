@@ -61,8 +61,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceId: "Chinese (Mandarin)_News_Anchor",
   model: "speech-2.8-turbo",
   speed: 1,
-  /** Natural breath between paragraphs; 0 = full gapless. */
-  paragraphInterval: 0.15,
+  /** Breath between paragraphs (seconds). 0 = continuous speech. */
+  paragraphInterval: 0.05,
   languageBoost: "Chinese",
   grokApiKey: "",
   grokVoiceId: "eve",

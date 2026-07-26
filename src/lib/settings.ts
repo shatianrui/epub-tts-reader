@@ -8,7 +8,15 @@ const SETTINGS_UPDATED_AT_KEY = "epub-tts-settings-updated-at";
 export function normalizeSettings(
   partial?: Partial<AppSettings> | null,
 ): AppSettings {
-  return { ...DEFAULT_SETTINGS, ...(partial || {}) };
+  const merged: AppSettings = { ...DEFAULT_SETTINGS, ...(partial || {}) };
+  // Soft-migrate old defaults that left long pauses between paragraphs.
+  if (
+    partial &&
+    (partial.paragraphInterval === 0.1 || partial.paragraphInterval === 0.15)
+  ) {
+    merged.paragraphInterval = DEFAULT_SETTINGS.paragraphInterval;
+  }
+  return merged;
 }
 
 export function loadSettings(): AppSettings {

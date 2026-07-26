@@ -496,14 +496,14 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
 
           <label className="field">
             <span>
-              段落朗读间隔：{(settings.paragraphInterval ?? 0.15).toFixed(2)} 秒
+              段落朗读间隔：{(settings.paragraphInterval ?? 0.05).toFixed(2)} 秒
             </span>
             <input
               type="range"
               min={0}
-              max={2}
-              step={0.05}
-              value={settings.paragraphInterval ?? 0.15}
+              max={1}
+              step={0.01}
+              value={settings.paragraphInterval ?? 0.05}
               onChange={(e) =>
                 setSettings((s) => ({
                   ...s,
@@ -512,8 +512,8 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
               }
             />
             <small>
-              段间呼吸停顿。0 = 播客级无缝衔接（Web Audio 时间轴 gapless +
-              微 crossfade）
+              像人说话时的换气停顿。默认 0.05 秒；0 = 完全连贯（自动裁剪 TTS
+              尾静音 + 交叉淡入）
             </small>
           </label>
 

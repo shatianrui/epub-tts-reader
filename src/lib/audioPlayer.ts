@@ -7,19 +7,25 @@ const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
 /** Look-ahead when scheduling on AudioContext timeline (seconds). */
-const SCHEDULE_AHEAD_SEC = 0.04;
+const SCHEDULE_AHEAD_SEC = 0.025;
 
 /** Short crossfade hides MP3 encoder padding / click at joins. */
-const CROSSFADE_SEC = 0.014;
+const CROSSFADE_SEC = 0.02;
 
-/** Tail pad when duration comes from decoded PCM / API timestamps. */
-const TAIL_PAD_TRUSTED_MS = 40;
+/** Near-zero pad once PCM duration is known (human-speech handoff). */
+const TAIL_PAD_TRUSTED_MS = 8;
 
-/** Tail pad when duration is only a byte-rate estimate (HTML / early ended). */
-const TAIL_PAD_ESTIMATE_MS = 280;
+/** Small pad only when duration is a rough estimate (HTML fallback). */
+const TAIL_PAD_ESTIMATE_MS = 60;
 
 /** Never trust an `ended` that fires before this fraction of expected duration. */
-const EARLY_END_RATIO = 0.92;
+const EARLY_END_RATIO = 0.88;
+
+/** Amplitude threshold for trimming encoder silence at clip edges. */
+const SILENCE_AMP = 0.012;
+
+/** Keep at least this much audio after trim (seconds). */
+const MIN_TRIMMED_SEC = 0.08;
 
 export type DurationTrust = "decoded" | "api" | "estimate";
 
@@ -82,16 +88,73 @@ function estimateMp3DurationSec(bytes: ArrayBuffer): number {
   return Math.max(sec128, sec96 * 0.85);
 }
 
-function pickDurationFloor(
+/**
+ * Playback duration for HTML path. Prefer real element/API duration —
+ * never stretch with the MP3 byte estimate (that left long silent tails).
+ */
+function pickPlayDurationSec(
   knownDuration: number,
   elementDuration: number,
   byteEstimate: number,
 ): number {
-  const candidates = [knownDuration, elementDuration, byteEstimate].filter(
-    (n) => Number.isFinite(n) && n > 0,
-  );
-  if (candidates.length === 0) return 0;
-  return Math.max(...candidates);
+  if (Number.isFinite(elementDuration) && elementDuration > 0) {
+    return elementDuration;
+  }
+  if (Number.isFinite(knownDuration) && knownDuration > 0) {
+    return knownDuration;
+  }
+  if (Number.isFinite(byteEstimate) && byteEstimate > 0) {
+    return byteEstimate;
+  }
+  return 0;
+}
+
+/**
+ * Strip leading/trailing encoder silence so paragraph joins sound like
+ * continuous speech instead of "clip + dead air + clip".
+ */
+function trimSilence(
+  ctx: AudioContext,
+  input: AudioBuffer,
+  threshold = SILENCE_AMP,
+): AudioBuffer {
+  const channels = input.numberOfChannels;
+  const rate = input.sampleRate;
+  const total = input.length;
+  if (total < rate * MIN_TRIMMED_SEC) return input;
+
+  const peaks = new Float32Array(total);
+  for (let c = 0; c < channels; c++) {
+    const data = input.getChannelData(c);
+    for (let i = 0; i < total; i++) {
+      const a = Math.abs(data[i]);
+      if (a > peaks[i]) peaks[i] = a;
+    }
+  }
+
+  let start = 0;
+  while (start < total && peaks[start] < threshold) start += 1;
+
+  let end = total - 1;
+  while (end > start && peaks[end] < threshold) end -= 1;
+
+  // Keep a few ms of tail so the last consonant isn't clipped
+  const pad = Math.floor(rate * 0.012);
+  start = Math.max(0, start - Math.floor(rate * 0.004));
+  end = Math.min(total - 1, end + pad);
+
+  const outLen = end - start + 1;
+  if (outLen >= total - 8 || outLen < rate * MIN_TRIMMED_SEC) {
+    return input;
+  }
+
+  const out = ctx.createBuffer(channels, outLen, rate);
+  for (let c = 0; c < channels; c++) {
+    out
+      .getChannelData(c)
+      .set(input.getChannelData(c).subarray(start, end + 1));
+  }
+  return out;
 }
 
 function flattenPrepared(prepared: PreparedAudio): PreparedClip[] {
@@ -101,12 +164,6 @@ function flattenPrepared(prepared: PreparedAudio): PreparedClip[] {
 
 function tailPadMs(trust: DurationTrust): number {
   return trust === "estimate" ? TAIL_PAD_ESTIMATE_MS : TAIL_PAD_TRUSTED_MS;
-}
-
-function maxTrust(parts: PreparedClip[]): DurationTrust {
-  if (parts.some((p) => p.trust === "estimate")) return "estimate";
-  if (parts.some((p) => p.trust === "api")) return "api";
-  return "decoded";
 }
 
 /**
@@ -291,30 +348,24 @@ export class MobileAudioPlayer {
 
     try {
       const decoded = await this.ctx.decodeAudioData(buffer.slice(0));
-      const durationSec = Math.max(
-        hintDuration || 0,
-        decoded.duration,
-        byteEstimate,
-      );
-      const trust: DurationTrust =
-        decoded.duration > 0
-          ? "decoded"
-          : durationTrusted && hintDuration
-            ? "api"
-            : "estimate";
+      // Use PCM length only — byte-rate estimates were longer than real audio
+      // and inserted dead air between every paragraph.
+      const trimmed = trimSilence(this.ctx, decoded);
+      const durationSec = trimmed.duration;
       return {
         kind: "decoded",
-        audioBuffer: decoded,
+        audioBuffer: trimmed,
         raw: buffer,
         durationSec,
         mimeType,
-        trust,
+        trust: "decoded" as DurationTrust,
       };
     } catch {
       return {
         kind: "raw",
         buffer,
-        durationSec: Math.max(hintDuration || 0, byteEstimate) || undefined,
+        durationSec:
+          (durationTrusted && hintDuration) || byteEstimate || undefined,
         mimeType,
         trust: durationTrusted && hintDuration ? "api" : "estimate",
       };
@@ -403,7 +454,8 @@ export class MobileAudioPlayer {
     try {
       for (let i = 0; i < parts.length; i++) {
         const audioBuffer = parts[i].audioBuffer;
-        const dur = Math.max(audioBuffer.duration, parts[i].durationSec || 0);
+        // Always schedule on real PCM duration (already silence-trimmed).
+        const dur = audioBuffer.duration;
         if (dur <= 0) continue;
 
         const source = ctx.createBufferSource();
@@ -412,15 +464,18 @@ export class MobileAudioPlayer {
         source.connect(gain);
         gain.connect(gainMaster);
 
-        const startAt = i === 0 ? t : Math.max(t - fade, now);
-        const fadeInEnd = startAt + Math.min(fade, dur * 0.25);
-        const fadeOutStart = startAt + Math.max(dur - fade, dur * 0.5);
+        // Overlap joins (including first clip when chaining) for speech flow.
+        const overlap = chaining || i > 0 ? fade : 0;
+        const startAt = i === 0 ? Math.max(t - overlap, now) : Math.max(t - fade, now);
+        const fadeInEnd = startAt + Math.min(fade, dur * 0.2);
+        const fadeOutStart = startAt + Math.max(dur - fade, dur * 0.55);
 
-        gain.gain.setValueAtTime(i === 0 ? 1 : 0.0001, startAt);
-        if (i > 0) {
+        gain.gain.setValueAtTime(overlap > 0 ? 0.0001 : 1, startAt);
+        if (overlap > 0) {
           gain.gain.linearRampToValueAtTime(1, fadeInEnd);
         }
-        if (i < parts.length - 1 && dur > fade * 2) {
+        // Always ease out a hair so the next paragraph can crossfade in.
+        if (dur > fade * 2) {
           gain.gain.setValueAtTime(1, fadeOutStart);
           gain.gain.linearRampToValueAtTime(0.0001, startAt + dur);
         }
@@ -445,18 +500,17 @@ export class MobileAudioPlayer {
 
     if (this.activeSources.length === 0) return false;
 
-    const trust = maxTrust(parts);
-    const padSec = tailPadMs(trust) / 1000;
-    const gapSec = gapAfterMs / 1000;
-    // Next clip may schedule at timelineEnd — keep gap on the audio clock.
+    const gapSec = Math.max(0, gapAfterMs) / 1000;
+    // Speech-like: schedule next clip to start just before this one ends
+    // (crossfade window), plus any user paragraph breath.
+    const handoffEarly = gapSec <= 0.001 ? CROSSFADE_SEC : 0;
     this.timelineEnd = t + gapSec;
-    // Gapless handoff: resolve slightly before audio ends when no pause, so the
-    // next playPrepared can schedule on the same timeline with crossfade.
-    // With a pause, resolve when the silence ends (no extra pad stacked).
-    const waitUntil =
-      gapSec > 0
-        ? this.timelineEnd
-        : Math.max(t - SCHEDULE_AHEAD_SEC, t + padSec - SCHEDULE_AHEAD_SEC * 2);
+    // Resolve early enough for the Reader loop to chain the next paragraph
+    // onto the same AudioContext clock without a JS gap.
+    const waitUntil = Math.max(
+      now + 0.01,
+      this.timelineEnd - handoffEarly - SCHEDULE_AHEAD_SEC,
+    );
 
     const outcome = await new Promise<"ended" | "stopped" | "error">(
       (resolve) => {
@@ -583,40 +637,19 @@ export class MobileAudioPlayer {
         this.settleCurrent = done;
 
         const expectedMs = () => {
-          const floor = pickDurationFloor(
+          const sec = pickPlayDurationSec(
             knownDuration,
             safeElementDuration(),
             byteEstimate,
           );
-          return floor > 0 ? floor * 1000 : 0;
+          return sec > 0 ? sec * 1000 : 0;
         };
 
-        const tryFinish = () => {
+        const finishSoon = () => {
           if (finished || token !== this.playToken) {
             if (token !== this.playToken) done("stopped");
             return;
           }
-
-          const need = expectedMs();
-          const elapsed = performance.now() - startedAt;
-
-          if (need > 0 && elapsed < need * EARLY_END_RATIO) {
-            if (el.paused && !el.ended) {
-              void el.play().catch(() => undefined);
-            }
-            return;
-          }
-
-          if (need > 0 && elapsed < need - 20) {
-            if (padTimer == null) {
-              padTimer = window.setTimeout(() => {
-                padTimer = null;
-                tryFinish();
-              }, Math.max(20, need - elapsed + padMs));
-            }
-            return;
-          }
-
           if (padTimer == null) {
             padTimer = window.setTimeout(() => {
               padTimer = null;
@@ -625,15 +658,56 @@ export class MobileAudioPlayer {
           }
         };
 
+        const tryFinish = (fromEnded: boolean) => {
+          if (finished || token !== this.playToken) {
+            if (token !== this.playToken) done("stopped");
+            return;
+          }
+
+          const need = expectedMs();
+          const elapsed = performance.now() - startedAt;
+
+          // Natural end event: do not wait out an inflated duration estimate.
+          if (fromEnded) {
+            if (need > 0 && elapsed < need * EARLY_END_RATIO) {
+              if (el.paused && !el.ended) {
+                void el.play().catch(() => undefined);
+              }
+              return;
+            }
+            finishSoon();
+            return;
+          }
+
+          if (need > 0 && elapsed < need * EARLY_END_RATIO) {
+            if (el.paused && !el.ended) {
+              void el.play().catch(() => undefined);
+            }
+            return;
+          }
+
+          if (need > 0 && elapsed < need - 15) {
+            if (padTimer == null) {
+              padTimer = window.setTimeout(() => {
+                padTimer = null;
+                tryFinish(false);
+              }, Math.max(15, need - elapsed));
+            }
+            return;
+          }
+
+          finishSoon();
+        };
+
         const onEnded = () => {
           endedSignal = true;
-          tryFinish();
+          tryFinish(true);
         };
 
         const onTimeUpdate = () => {
           const dur = safeElementDuration();
-          if (dur > 0 && el.currentTime >= dur - 0.05) {
-            tryFinish();
+          if (dur > 0 && el.currentTime >= dur - 0.04) {
+            tryFinish(false);
           }
         };
 
@@ -649,27 +723,26 @@ export class MobileAudioPlayer {
           const need = expectedMs();
           const elapsed = performance.now() - startedAt;
 
+          if (endedSignal) {
+            tryFinish(true);
+            return;
+          }
+
           if (need > 0 && elapsed >= need + padMs) {
             if (
-              endedSignal ||
               el.ended ||
               el.paused ||
               (safeElementDuration() > 0 &&
-                el.currentTime >= safeElementDuration() - 0.12)
+                el.currentTime >= safeElementDuration() - 0.08)
             ) {
               done("ended");
               return;
             }
-            if (elapsed >= need + 2000) {
+            if (elapsed >= need + 1200) {
               done("ended");
             }
-            return;
           }
-
-          if (need <= 0 && endedSignal) {
-            tryFinish();
-          }
-        }, 40);
+        }, 32);
 
         el.addEventListener("ended", onEnded);
         el.addEventListener("error", onError);

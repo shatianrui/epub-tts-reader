@@ -285,7 +285,7 @@ export function Reader({
           const next = advancePos(book.chapters, pos);
           let gapAfterMs = Math.max(
             0,
-            (settings.paragraphInterval ?? 0.15) * 1000,
+            (settings.paragraphInterval ?? 0.05) * 1000,
           );
 
           if (!next) {
