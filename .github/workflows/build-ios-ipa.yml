@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-ios
@@ -49,8 +49,8 @@ jobs:
         run: npx cap sync ios
 
       # No Apple Developer account on CI — produce an ad-hoc-signed IPA
-      # (Payload/*.app zip). Install via Sideloadly / AltStore / TrollStore
-      # (they re-sign with your Apple ID), or open ios/App in Xcode → Run.
+      # (Payload/*.app). Re-sign with Sideloadly / AltStore / TrollStore, or
+      # open ios/App in Xcode → Run on a device.
       - name: Build iOS app
         working-directory: ios/App
         run: |
@@ -82,7 +82,9 @@ jobs:
           echo "Using app: ${APP_PATH}"
           ls -la "${APP_PATH}"
           test -f "${APP_PATH}/Info.plist"
-          test -f "${APP_PATH}/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP_PATH}/Info.plist")"
+          EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP_PATH}/Info.plist")"
+          test -f "${APP_PATH}/${EXEC}"
+          test -d "${APP_PATH}/_CodeSignature" || true
 
           STAGE="$(pwd)/build/ipa-stage"
           DIST="$(pwd)/build/dist"
@@ -90,35 +92,75 @@ jobs:
           mkdir -p "${STAGE}/Payload" "${DIST}"
 
           APP_NAME="$(basename "${APP_PATH}")"
-          # ditto preserves symlinks / bundle metadata better than cp -r
           ditto "${APP_PATH}" "${STAGE}/Payload/${APP_NAME}"
 
-          # Ad-hoc sign so the bundle is a real codesigned .app inside the IPA
+          # Ad-hoc sign so Sideloadly/AltStore see a real app bundle
           codesign --force --deep --sign - "${STAGE}/Payload/${APP_NAME}"
           codesign -dv --verbose=2 "${STAGE}/Payload/${APP_NAME}" 2>&1 | tee /tmp/codesign.txt || true
+          test -d "${STAGE}/Payload/${APP_NAME}/_CodeSignature"
 
           IPA_PATH="${DIST}/ListenPage.ipa"
-          # Apple-style IPA: zip whose root entry is Payload/
+          # Root of archive MUST be Payload/ (Apple IPA layout)
           (
             cd "${STAGE}"
-            ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_PATH}"
+            # zip -y keeps symlinks; ditto also works — use both-validated zip
+            /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_PATH}"
           )
 
           echo "IPA bytes: $(wc -c < "${IPA_PATH}")"
-          # Validate layout
-          unzip -l "${IPA_PATH}" | head -n 40
-          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/Info\.plist' >/dev/null
-          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/' >/dev/null
+          file "${IPA_PATH}"
+          unzip -l "${IPA_PATH}" | head -n 50
 
-          # Confirm magic: IPA is a zip
-          file "${IPA_PATH}" | grep -qi 'zip'
+          # Hard fail unless this is a real IPA payload
+          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/Info\.plist' >/dev/null
+          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/_CodeSignature/' >/dev/null
+          # Must NOT be a nested GitHub-style single-file wrapper
+          COUNT="$(unzip -l "${IPA_PATH}" | awk 'END{print $2}')"
+          echo "zip entries≈${COUNT}"
+          FILE_OUT="$(file -b "${IPA_PATH}")"
+          echo "file(1): ${FILE_OUT}"
+          echo "${FILE_OUT}" | grep -Ei 'iOS App Zip|Zip archive' >/dev/null
+
+          # Extract once to prove installers can open it
+          VERIFY="$(pwd)/build/ipa-verify"
+          rm -rf "${VERIFY}"
+          mkdir -p "${VERIFY}"
+          unzip -q "${IPA_PATH}" -d "${VERIFY}"
+          test -f "${VERIFY}/Payload/${APP_NAME}/Info.plist"
+          test -f "${VERIFY}/Payload/${APP_NAME}/${EXEC}"
+
           echo "IPA_PATH=${IPA_PATH}" >> "$GITHUB_ENV"
           echo "Packaged OK → ${IPA_PATH}"
 
+      # IMPORTANT: artifact *name* must NOT end in .ipa — Actions always wraps
+      # downloads in an outer .zip. Naming the artifact "Foo.ipa" makes browsers
+      # save the outer zip as Foo.ipa, which is NOT a valid IPA.
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ListenPage.ipa
+          name: ListenPage-iOS
           path: ios/App/build/dist/ListenPage.ipa
           if-no-files-found: error
           retention-days: 30
+
+      # Direct .ipa download (no outer zip): Release asset
+      - name: Publish IPA release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ios-latest"
+          NOTES="Ad-hoc signed ListenPage IPA (commit ${GITHUB_SHA}).
+
+          **Install:** Sideloadly / AltStore / TrollStore (re-sign with your Apple ID).
+          Or open \`ios/App\` in Xcode → Run on a device.
+
+          **Do not** use the Actions artifact zip as if it were the IPA — download
+          \`ListenPage.ipa\` from this release instead."
+
+          gh release delete "${TAG}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "${TAG}" \
+            "ios/App/build/dist/ListenPage.ipa" \
+            --title "ListenPage iOS (latest)" \
+            --notes "${NOTES}" \
+            --latest=false
