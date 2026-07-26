@@ -1,3 +1,9 @@
+import {
+  isNativeIosAudio,
+  playNativeQueue,
+  stopNativeAudio,
+} from "./backgroundAudio";
+
 type AudioWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
@@ -448,9 +454,9 @@ export class MobileAudioPlayer {
   }
 
   /**
-   * Schedule several paragraphs onto the Web Audio clock at once.
-   * Critical for iOS background: JS timers freeze, but already-scheduled
-   * AudioBufferSourceNodes keep playing under UIBackgroundModes=audio.
+   * Schedule several paragraphs for playback.
+   * On native iOS: AVAudioPlayer queue (true lock-screen / background audio).
+   * Elsewhere: Web Audio timeline batching, HTMLAudio fallback.
    */
   async playWindow(
     segments: TimelineSegment[],
@@ -462,6 +468,51 @@ export class MobileAudioPlayer {
       );
     }
     if (segments.length === 0) return;
+
+    const gen = this.generation;
+
+    // —— Native iOS path (reliable background via AVAudioPlayer) ——
+    if (isNativeIosAudio()) {
+      const clips: {
+        buffer: ArrayBuffer;
+        mimeType?: string;
+        id?: string;
+        gapAfterMs?: number;
+      }[] = [];
+      for (let s = 0; s < segments.length; s++) {
+        const parts = flattenPrepared(segments[s].prepared);
+        const segGap = Math.max(0, segments[s].gapAfterMs ?? 0);
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          const buffer =
+            part.kind === "decoded" ? part.raw : part.buffer;
+          // Gap only after the last part of a paragraph segment
+          const isLastPart = i === parts.length - 1;
+          clips.push({
+            buffer,
+            mimeType: part.mimeType || "audio/mpeg",
+            id: `s${s}-${i}-${gen}`,
+            gapAfterMs: isLastPart ? segGap : 0,
+          });
+        }
+      }
+      if (clips.length === 0) return;
+
+      let lastSeg = -1;
+      await playNativeQueue(clips, {
+        shouldContinue: () => this.generation === gen,
+        onTrackStart: (_clipIndex, id) => {
+          if (this.generation !== gen) return;
+          const m = /^s(\d+)-/.exec(id);
+          const segIndex = m ? Number(m[1]) : 0;
+          if (segIndex !== lastSeg) {
+            lastSeg = segIndex;
+            opts.onSegmentStart?.(segIndex);
+          }
+        },
+      });
+      return;
+    }
 
     if (this.ctx?.state === "suspended") {
       await this.ctx.resume().catch(() => undefined);
@@ -496,7 +547,6 @@ export class MobileAudioPlayer {
     }
 
     // HTMLAudio fallback — sequential (still better than silence).
-    const gen = this.generation;
     for (let s = 0; s < segments.length; s++) {
       if (this.generation !== gen) return;
       opts.onSegmentStart?.(s);
@@ -505,10 +555,6 @@ export class MobileAudioPlayer {
       for (let i = 0; i < parts.length; i++) {
         if (this.generation !== gen) return;
         const part = parts[i];
-        const isLast = i === parts.length - 1 && s === segments.length - 1;
-        // gap only after full segment
-        const partGap =
-          i === parts.length - 1 ? (isLast ? gapAfterMs : gapAfterMs) : 0;
         const raw = part.kind === "decoded" ? part.raw : part.buffer;
         const token = ++this.playToken;
         await this.playHtmlWithGate(
@@ -906,6 +952,7 @@ export class MobileAudioPlayer {
     this.clearSegmentTimers();
     this.stopSources();
     this.stopKeepAlive();
+    void stopNativeAudio();
     for (const el of this.elements) {
       try {
         el.pause();

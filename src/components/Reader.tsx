@@ -46,10 +46,10 @@ function advancePos(
 }
 
 /** Prefetch depth — higher so background batches are already synthesized. */
-const PREFETCH_AHEAD = 5;
+const PREFETCH_AHEAD = 6;
 /** Paragraphs scheduled onto the audio clock in one shot (iOS background). */
-const PLAY_BATCH_FOREGROUND = 2;
-const PLAY_BATCH_BACKGROUND = 4;
+const PLAY_BATCH_FOREGROUND = 3;
+const PLAY_BATCH_BACKGROUND = 6;
 
 export function Reader({
   book,
