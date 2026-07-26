@@ -11,11 +11,17 @@ on:
       - "package.json"
       - "package-lock.json"
       - "next.config.ts"
+      - "tsconfig.json"
+      - "postcss.config.mjs"
       - ".github/workflows/build-ios-ipa.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: build-ios
+  cancel-in-progress: true
 
 jobs:
   build:

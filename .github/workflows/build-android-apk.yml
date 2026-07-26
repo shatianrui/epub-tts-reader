@@ -11,11 +11,17 @@ on:
       - "package.json"
       - "package-lock.json"
       - "next.config.ts"
+      - "tsconfig.json"
+      - "postcss.config.mjs"
       - ".github/workflows/build-android-apk.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: build-android
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -55,9 +61,14 @@ jobs:
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Package APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/ListenPage-debug.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: listenpage-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: dist/ListenPage-debug.apk
           retention-days: 30
