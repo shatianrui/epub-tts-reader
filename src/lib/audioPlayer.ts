@@ -68,6 +68,17 @@ export type PlayPreparedOptions = {
   gapAfterMs?: number;
 };
 
+/** One paragraph (or multi-part clip) in a pre-scheduled background window. */
+export type TimelineSegment = {
+  prepared: PreparedAudio;
+  gapAfterMs?: number;
+};
+
+export type PlayWindowOptions = {
+  /** Fires when a segment becomes the audible head (UI highlight). */
+  onSegmentStart?: (index: number) => void;
+};
+
 export type MediaSessionHandlers = {
   play?: () => void;
   pause?: () => void;
@@ -186,6 +197,9 @@ export class MobileAudioPlayer {
   private timelineEnd = 0;
   private activeSources: AudioBufferSourceNode[] = [];
   private masterGain: GainNode | null = null;
+  /** Near-silent loop keeps the iOS audio session alive while JS is suspended. */
+  private keepAliveSource: AudioBufferSourceNode | null = null;
+  private segmentTimers: number[] = [];
 
   /** Call synchronously inside a click/touch handler. */
   unlock(): void {
@@ -194,9 +208,11 @@ export class MobileAudioPlayer {
       if (!this.ctx || this.ctx.state === "closed") {
         this.ctx = new AC();
         this.masterGain = null;
+        this.keepAliveSource = null;
       }
       void this.ctx.resume();
       this.ensureMasterGain();
+      this.startKeepAlive();
     }
 
     this.ensureElements();
@@ -216,18 +232,70 @@ export class MobileAudioPlayer {
 
     if (!this.visibilityHandler && typeof document !== "undefined") {
       this.visibilityHandler = () => {
-        if (document.visibilityState === "visible") {
-          if (this.ctx) void this.ctx.resume();
-          const cur = this.elements[this.activeEl];
-          if (cur && cur.paused && this.settleCurrent) {
-            void cur.play().catch(() => undefined);
-          }
+        // Resume session both when returning AND when entering background
+        // (iOS may suspend AudioContext on hide).
+        if (this.ctx) void this.ctx.resume();
+        this.startKeepAlive();
+        const cur = this.elements[this.activeEl];
+        if (
+          document.visibilityState === "visible" &&
+          cur &&
+          cur.paused &&
+          this.settleCurrent
+        ) {
+          void cur.play().catch(() => undefined);
         }
       };
       document.addEventListener("visibilitychange", this.visibilityHandler);
+      document.addEventListener("pagehide", this.visibilityHandler);
+      window.addEventListener("pageshow", this.visibilityHandler);
     }
 
     this.unlocked = true;
+  }
+
+  /** Inaudible looping buffer so iOS does not tear down the playback session. */
+  private startKeepAlive(): void {
+    if (!this.ctx || this.ctx.state === "closed") return;
+    if (this.keepAliveSource) return;
+    try {
+      const buf = this.ctx.createBuffer(1, this.ctx.sampleRate, this.ctx.sampleRate);
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const g = this.ctx.createGain();
+      // Non-zero: fully muted nodes can be culled by iOS power management.
+      g.gain.value = 0.00001;
+      src.connect(g);
+      g.connect(this.ctx.destination);
+      src.start();
+      this.keepAliveSource = src;
+    } catch {
+      this.keepAliveSource = null;
+    }
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveSource) {
+      try {
+        this.keepAliveSource.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        this.keepAliveSource.disconnect();
+      } catch {
+        /* ignore */
+      }
+      this.keepAliveSource = null;
+    }
+  }
+
+  private clearSegmentTimers(): void {
+    for (const id of this.segmentTimers) {
+      window.clearTimeout(id);
+    }
+    this.segmentTimers = [];
   }
 
   private ensureMasterGain(): GainNode | null {
@@ -376,140 +444,199 @@ export class MobileAudioPlayer {
     prepared: PreparedAudio,
     opts: PlayPreparedOptions = {},
   ): Promise<void> {
+    await this.playWindow([{ prepared, gapAfterMs: opts.gapAfterMs }], {});
+  }
+
+  /**
+   * Schedule several paragraphs onto the Web Audio clock at once.
+   * Critical for iOS background: JS timers freeze, but already-scheduled
+   * AudioBufferSourceNodes keep playing under UIBackgroundModes=audio.
+   */
+  async playWindow(
+    segments: TimelineSegment[],
+    opts: PlayWindowOptions = {},
+  ): Promise<void> {
     if (!this.unlocked) {
       throw new Error(
         "请先点击「继续朗读」按钮开始播放（手机浏览器需要手动触发声音）",
       );
     }
+    if (segments.length === 0) return;
 
-    const gapAfterMs = Math.max(0, opts.gapAfterMs ?? 0);
-    const parts = flattenPrepared(prepared);
-    if (parts.length === 0) return;
+    if (this.ctx?.state === "suspended") {
+      await this.ctx.resume().catch(() => undefined);
+    }
+    this.startKeepAlive();
 
-    const allDecoded =
-      parts.every((p) => p.kind === "decoded") &&
-      !!this.ctx &&
-      this.ctx.state !== "closed";
-
-    if (allDecoded) {
-      if (this.ctx!.state === "suspended") {
-        await this.ctx!.resume().catch(() => undefined);
+    const decodedWindows: {
+      parts: Extract<PreparedClip, { kind: "decoded" }>[];
+      gapAfterMs: number;
+    }[] = [];
+    let allDecoded = true;
+    for (const seg of segments) {
+      const parts = flattenPrepared(seg.prepared);
+      if (
+        parts.length === 0 ||
+        !parts.every((p) => p.kind === "decoded") ||
+        !this.ctx ||
+        this.ctx.state === "closed"
+      ) {
+        allDecoded = false;
+        break;
       }
-      if (this.ctx!.state === "running") {
-        const ok = await this.playDecodedTimeline(
-          parts as Extract<PreparedClip, { kind: "decoded" }>[],
-          gapAfterMs,
-        );
-        if (ok) return;
-      }
+      decodedWindows.push({
+        parts: parts as Extract<PreparedClip, { kind: "decoded" }>[],
+        gapAfterMs: Math.max(0, seg.gapAfterMs ?? 0),
+      });
     }
 
-    // HTMLAudio path (single or multi-part with dual-element handoff)
+    if (allDecoded && this.ctx?.state === "running") {
+      const ok = await this.playDecodedWindow(decodedWindows, opts);
+      if (ok) return;
+    }
+
+    // HTMLAudio fallback — sequential (still better than silence).
     const gen = this.generation;
-    for (let i = 0; i < parts.length; i++) {
+    for (let s = 0; s < segments.length; s++) {
       if (this.generation !== gen) return;
-      const part = parts[i];
-      const isLast = i === parts.length - 1;
-      const partGap = isLast ? gapAfterMs : 0;
-      const raw = part.kind === "decoded" ? part.raw : part.buffer;
-      const token = ++this.playToken;
-      await this.playHtmlWithGate(
-        raw,
-        part.durationSec ?? 0,
-        part.mimeType || "audio/mpeg",
-        part.trust,
-        token,
-        partGap,
-      );
+      opts.onSegmentStart?.(s);
+      const parts = flattenPrepared(segments[s].prepared);
+      const gapAfterMs = Math.max(0, segments[s].gapAfterMs ?? 0);
+      for (let i = 0; i < parts.length; i++) {
+        if (this.generation !== gen) return;
+        const part = parts[i];
+        const isLast = i === parts.length - 1 && s === segments.length - 1;
+        // gap only after full segment
+        const partGap =
+          i === parts.length - 1 ? (isLast ? gapAfterMs : gapAfterMs) : 0;
+        const raw = part.kind === "decoded" ? part.raw : part.buffer;
+        const token = ++this.playToken;
+        await this.playHtmlWithGate(
+          raw,
+          part.durationSec ?? 0,
+          part.mimeType || "audio/mpeg",
+          part.trust,
+          token,
+          i === parts.length - 1 ? gapAfterMs : 0,
+        );
+      }
     }
   }
 
   /**
-   * Schedule decoded buffers back-to-back on the AudioContext clock with a
-   * short crossfade. gapAfterMs is included in the waited timeline so the
-   * next playPrepared call can start exactly when the pause ends.
+   * Schedule one or more paragraph windows on the AudioContext clock.
+   * All buffers are queued up-front so playback survives iOS JS suspension.
    */
-  private async playDecodedTimeline(
-    parts: Extract<PreparedClip, { kind: "decoded" }>[],
-    gapAfterMs: number,
+  private async playDecodedWindow(
+    windows: {
+      parts: Extract<PreparedClip, { kind: "decoded" }>[];
+      gapAfterMs: number;
+    }[],
+    opts: PlayWindowOptions,
   ): Promise<boolean> {
     if (!this.ctx || this.ctx.state !== "running") return false;
     const gainMaster = this.ensureMasterGain();
     if (!gainMaster) return false;
 
     this.finishPlayback("stopped");
+    this.clearSegmentTimers();
     const token = ++this.playToken;
     const gen = this.generation;
 
     const ctx = this.ctx;
     const now = ctx.currentTime;
-    // Continue from previous timeline when still in the future (gapless chain).
     const chaining = this.timelineEnd > now + 0.001;
     if (!chaining) {
       this.stopSources();
     }
     let t = chaining ? this.timelineEnd : now + SCHEDULE_AHEAD_SEC;
     const fade = CROSSFADE_SEC;
+    let scheduledCount = 0;
+    const segmentStarts: number[] = [];
 
     try {
-      for (let i = 0; i < parts.length; i++) {
-        const audioBuffer = parts[i].audioBuffer;
-        // Always schedule on real PCM duration (already silence-trimmed).
-        const dur = audioBuffer.duration;
-        if (dur <= 0) continue;
+      for (let w = 0; w < windows.length; w++) {
+        const { parts, gapAfterMs } = windows[w];
+        let segmentStart = -1;
+        for (let i = 0; i < parts.length; i++) {
+          const audioBuffer = parts[i].audioBuffer;
+          const dur = audioBuffer.duration;
+          if (dur <= 0) continue;
 
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        const gain = ctx.createGain();
-        source.connect(gain);
-        gain.connect(gainMaster);
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          const gain = ctx.createGain();
+          source.connect(gain);
+          gain.connect(gainMaster);
 
-        // Overlap joins (including first clip when chaining) for speech flow.
-        const overlap = chaining || i > 0 ? fade : 0;
-        const startAt = i === 0 ? Math.max(t - overlap, now) : Math.max(t - fade, now);
-        const fadeInEnd = startAt + Math.min(fade, dur * 0.2);
-        const fadeOutStart = startAt + Math.max(dur - fade, dur * 0.55);
+          const isJoin = scheduledCount > 0 || chaining;
+          const overlap = isJoin ? fade : 0;
+          const startAt = Math.max(t - overlap, now);
+          if (segmentStart < 0) segmentStart = startAt;
+          const fadeInEnd = startAt + Math.min(fade, dur * 0.2);
+          const fadeOutStart = startAt + Math.max(dur - fade, dur * 0.55);
 
-        gain.gain.setValueAtTime(overlap > 0 ? 0.0001 : 1, startAt);
-        if (overlap > 0) {
-          gain.gain.linearRampToValueAtTime(1, fadeInEnd);
-        }
-        // Always ease out a hair so the next paragraph can crossfade in.
-        if (dur > fade * 2) {
-          gain.gain.setValueAtTime(1, fadeOutStart);
-          gain.gain.linearRampToValueAtTime(0.0001, startAt + dur);
-        }
-
-        source.onended = () => {
-          this.activeSources = this.activeSources.filter((s) => s !== source);
-          try {
-            source.disconnect();
-          } catch {
-            /* ignore */
+          gain.gain.setValueAtTime(overlap > 0 ? 0.0001 : 1, startAt);
+          if (overlap > 0) {
+            gain.gain.linearRampToValueAtTime(1, fadeInEnd);
           }
-        };
-        source.start(startAt);
-        this.activeSources.push(source);
+          if (dur > fade * 2) {
+            gain.gain.setValueAtTime(1, fadeOutStart);
+            gain.gain.linearRampToValueAtTime(0.0001, startAt + dur);
+          }
 
-        t = startAt + dur;
+          source.onended = () => {
+            this.activeSources = this.activeSources.filter((s) => s !== source);
+            try {
+              source.disconnect();
+            } catch {
+              /* ignore */
+            }
+          };
+          source.start(startAt);
+          this.activeSources.push(source);
+          scheduledCount += 1;
+          t = startAt + dur;
+        }
+
+        if (segmentStart >= 0) {
+          segmentStarts.push(segmentStart);
+        }
+        t += Math.max(0, gapAfterMs) / 1000;
       }
     } catch {
       this.stopSources();
       return false;
     }
 
-    if (this.activeSources.length === 0) return false;
+    if (scheduledCount === 0) return false;
 
-    const gapSec = Math.max(0, gapAfterMs) / 1000;
-    // Speech-like: schedule next clip to start just before this one ends
-    // (crossfade window), plus any user paragraph breath.
-    const handoffEarly = gapSec <= 0.001 ? CROSSFADE_SEC : 0;
-    this.timelineEnd = t + gapSec;
-    // Resolve early enough for the Reader loop to chain the next paragraph
-    // onto the same AudioContext clock without a JS gap.
+    this.timelineEnd = t;
+
+    // UI highlight timers (best-effort; may lag if JS is frozen in background)
+    if (opts.onSegmentStart) {
+      for (let i = 0; i < segmentStarts.length; i++) {
+        const delayMs = Math.max(
+          0,
+          (segmentStarts[i] - ctx.currentTime) * 1000,
+        );
+        const idx = i;
+        if (delayMs < 16) {
+          opts.onSegmentStart(idx);
+        } else {
+          const id = window.setTimeout(() => {
+            if (this.generation !== gen || token !== this.playToken) return;
+            opts.onSegmentStart?.(idx);
+          }, delayMs);
+          this.segmentTimers.push(id);
+        }
+      }
+    }
+
+    // Pull next batch slightly before this window ends (when JS is running).
     const waitUntil = Math.max(
       now + 0.01,
-      this.timelineEnd - handoffEarly - SCHEDULE_AHEAD_SEC,
+      this.timelineEnd - CROSSFADE_SEC - SCHEDULE_AHEAD_SEC,
     );
 
     const outcome = await new Promise<"ended" | "stopped" | "error">(
@@ -533,14 +660,14 @@ export class MobileAudioPlayer {
             done("error");
             return;
           }
-          // Keep context alive in background tabs
           if (this.ctx.state === "suspended") {
             void this.ctx.resume().catch(() => undefined);
+            this.startKeepAlive();
           }
           if (this.ctx.currentTime >= waitUntil - 0.005) {
             done("ended");
           }
-        }, 24);
+        }, 32);
       },
     );
 
@@ -548,9 +675,6 @@ export class MobileAudioPlayer {
       return true;
     }
     if (outcome === "error") throw new Error("音频播放失败");
-
-    // Keep timelineEnd for the next gapless schedule. Sources self-remove onended
-    // so early handoff can crossfade into the next clip.
     return true;
   }
 
@@ -779,7 +903,9 @@ export class MobileAudioPlayer {
     this.playToken += 1;
     this.timelineEnd = 0;
     this.finishPlayback("stopped");
+    this.clearSegmentTimers();
     this.stopSources();
+    this.stopKeepAlive();
     for (const el of this.elements) {
       try {
         el.pause();

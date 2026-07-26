@@ -12,6 +12,7 @@ import {
   setMediaSession,
   setMediaSessionPlaybackState,
   type PreparedAudio,
+  type TimelineSegment,
 } from "@/lib/audioPlayer";
 
 interface ReaderProps {
@@ -44,7 +45,11 @@ function advancePos(
   return null;
 }
 
-const PREFETCH_AHEAD = 3;
+/** Prefetch depth — higher so background batches are already synthesized. */
+const PREFETCH_AHEAD = 5;
+/** Paragraphs scheduled onto the audio clock in one shot (iOS background). */
+const PLAY_BATCH_FOREGROUND = 2;
+const PLAY_BATCH_BACKGROUND = 4;
 
 export function Reader({
   book,
@@ -202,29 +207,103 @@ export function Reader({
           return;
         }
 
-        const ch = book.chapters[pos.chapter];
-        if (pos.paragraph >= ch.paragraphs.length) {
-          const next = advancePos(book.chapters, {
-            chapter: pos.chapter,
-            paragraph: pos.paragraph - 1,
-          });
-          if (!next) {
-            setStatus("全书朗读完成");
-            stop();
-            return;
+        const batchSize =
+          typeof document !== "undefined" &&
+          document.visibilityState === "hidden"
+            ? PLAY_BATCH_BACKGROUND
+            : PLAY_BATCH_FOREGROUND;
+
+        // Build a multi-paragraph window and schedule it on the audio clock
+        // in one shot — survives iOS background JS throttling.
+        type BatchItem = { pos: Pos; prepared: PreparedAudio; gapAfterMs: number };
+        const batch: BatchItem[] = [];
+        let cursor: Pos | null = pos;
+        let stopAfterChapter = false;
+
+        while (cursor && batch.length < batchSize && stillActive()) {
+          const ch = book.chapters[cursor.chapter];
+          if (!ch || cursor.paragraph >= ch.paragraphs.length) {
+            cursor = advancePos(book.chapters, {
+              chapter: cursor.chapter,
+              paragraph: Math.max(0, (ch?.paragraphs.length || 1) - 1),
+            });
+            continue;
           }
-          pos = next;
-          continue;
+
+          const key = posKey(cursor);
+          if (batch.length === 0) {
+            let isReady = false;
+            const pending = ensurePrepared(cursor, player);
+            void pending.then(() => {
+              isReady = true;
+            });
+            await new Promise<void>((r) => setTimeout(r, 30));
+            if (!isReady && stillActive()) {
+              setLoading(true);
+              setStatus(
+                `合成中 · ${ch.title} · 段 ${cursor.paragraph + 1}/${ch.paragraphs.length}`,
+              );
+            }
+          }
+
+          try {
+            const prepared = await ensurePrepared(cursor, player);
+            if (!stillActive()) return;
+            prefetchRef.current.delete(key);
+
+            const next = advancePos(book.chapters, cursor);
+            let gapAfterMs = Math.max(
+              0,
+              (settings.paragraphInterval ?? 0.05) * 1000,
+            );
+
+            if (!next) {
+              gapAfterMs = 0;
+            } else if (next.chapter !== cursor.chapter) {
+              if (!settings.autoNextChapter) {
+                gapAfterMs = 0;
+                stopAfterChapter = true;
+              } else if (settings.chapterGap > 0) {
+                gapAfterMs = Math.max(gapAfterMs, settings.chapterGap * 1000);
+              }
+            }
+
+            batch.push({ pos: cursor, prepared, gapAfterMs });
+            prefetchAhead(cursor, player);
+
+            if (stopAfterChapter || !next) {
+              cursor = next;
+              break;
+            }
+            cursor = next;
+          } catch (e) {
+            if (!stillActive()) return;
+            if (batch.length === 0) {
+              setError(normalizePlayError(e).message);
+              stop();
+              return;
+            }
+            break;
+          }
         }
 
-        setChapterIndex(pos.chapter);
-        setParagraphIndex(pos.paragraph);
-        posRef.current = pos;
-        void persist(pos.chapter, pos.paragraph);
+        if (!stillActive()) return;
+        if (batch.length === 0) {
+          setStatus("全书朗读完成");
+          stop();
+          return;
+        }
+
+        const first = batch[0];
+        const firstCh = book.chapters[first.pos.chapter];
+        setChapterIndex(first.pos.chapter);
+        setParagraphIndex(first.pos.paragraph);
+        posRef.current = first.pos;
+        void persist(first.pos.chapter, first.pos.paragraph);
 
         setMediaSession(
           {
-            title: ch.title,
+            title: firstCh?.title || book.title,
             artist: book.author || book.title,
             album: book.title,
           },
@@ -244,93 +323,76 @@ export function Reader({
           },
         );
         setMediaSessionPlaybackState("playing");
+        setLoading(false);
+        setStatus(`朗读中 · ${firstCh?.title || book.title}`);
 
-        // Scroll only when visible — rAF is throttled in background tabs
         if (
           typeof document !== "undefined" &&
           document.visibilityState === "visible"
         ) {
           requestAnimationFrame(() => {
             document
-              .getElementById(`para-${pos.chapter}-${pos.paragraph}`)
+              .getElementById(
+                `para-${first.pos.chapter}-${first.pos.paragraph}`,
+              )
               ?.scrollIntoView({ behavior: "smooth", block: "center" });
           });
         }
 
-        const key = posKey(pos);
-        const pending = ensurePrepared(pos, player);
-        prefetchAhead(pos, player);
-
-        let isReady = false;
-        void pending.then(() => {
-          isReady = true;
-        });
-        await new Promise<void>((r) => setTimeout(r, 30));
-
-        if (!isReady && stillActive()) {
-          setLoading(true);
-          setStatus(
-            `合成中 · ${ch.title} · 段 ${pos.paragraph + 1}/${ch.paragraphs.length}`,
-          );
-        }
+        const segments: TimelineSegment[] = batch.map((b) => ({
+          prepared: b.prepared,
+          gapAfterMs: b.gapAfterMs,
+        }));
 
         try {
-          const prepared = await pending;
-          if (!stillActive()) return;
-
-          prefetchRef.current.delete(key);
-
-          // Resolve next position + gap before play so the audio clock can
-          // schedule paragraph pause / chapter pause gaplessly.
-          const next = advancePos(book.chapters, pos);
-          let gapAfterMs = Math.max(
-            0,
-            (settings.paragraphInterval ?? 0.05) * 1000,
-          );
-
-          if (!next) {
-            gapAfterMs = 0;
-          } else if (next.chapter !== pos.chapter) {
-            if (!settings.autoNextChapter) {
-              setLoading(false);
-              setStatus(`朗读中 · ${ch.title}`);
-              await player.playPrepared(prepared, { gapAfterMs: 0 });
+          await player.playWindow(segments, {
+            onSegmentStart: (index) => {
               if (!stillActive()) return;
-              setStatus(`${ch.title} 朗读完成，点击继续下一章`);
-              stop();
-              return;
-            }
-            if (settings.chapterGap > 0) {
-              gapAfterMs = Math.max(gapAfterMs, settings.chapterGap * 1000);
-              setStatus(`第 ${next.chapter + 1} 章即将开始…`);
-            }
-          }
-
-          // Keep next paragraph warm while current audio plays
-          if (next) {
-            void ensurePrepared(next, player);
-            prefetchAhead(next, player);
-          }
-
-          setLoading(false);
-          setStatus(`朗读中 · ${ch.title}`);
-          await player.playPrepared(prepared, { gapAfterMs });
-
-          if (!stillActive()) return;
-
-          if (!next) {
-            setStatus("全书朗读完成");
-            stop();
-            return;
-          }
-
-          pos = next;
+              const item = batch[index];
+              if (!item) return;
+              setChapterIndex(item.pos.chapter);
+              setParagraphIndex(item.pos.paragraph);
+              posRef.current = item.pos;
+              void persist(item.pos.chapter, item.pos.paragraph);
+              const title = book.chapters[item.pos.chapter]?.title;
+              if (title) setStatus(`朗读中 · ${title}`);
+              if (
+                typeof document !== "undefined" &&
+                document.visibilityState === "visible"
+              ) {
+                document
+                  .getElementById(
+                    `para-${item.pos.chapter}-${item.pos.paragraph}`,
+                  )
+                  ?.scrollIntoView({ behavior: "smooth", block: "center" });
+              }
+            },
+          });
         } catch (e) {
           if (!stillActive()) return;
           setError(normalizePlayError(e).message);
           stop();
           return;
         }
+
+        if (!stillActive()) return;
+
+        const last = batch[batch.length - 1];
+        if (stopAfterChapter) {
+          setStatus(
+            `${book.chapters[last.pos.chapter]?.title || ""} 朗读完成，点击继续下一章`,
+          );
+          stop();
+          return;
+        }
+
+        const nextPos = advancePos(book.chapters, last.pos);
+        if (!nextPos) {
+          setStatus("全书朗读完成");
+          stop();
+          return;
+        }
+        pos = nextPos;
       }
     },
     [
