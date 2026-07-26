@@ -30,7 +30,25 @@ export type BackgroundAudioPlugin = {
   ): Promise<{ remove: () => void }>;
 };
 
-const BackgroundAudio = registerPlugin<BackgroundAudioPlugin>("BackgroundAudio");
+const BackgroundAudio = registerPlugin<BackgroundAudioPlugin>("BackgroundAudio", {
+  // web stub so missing native impl fails clearly only on iOS native
+  web: () =>
+    ({
+      async enqueue() {
+        throw new Error("BackgroundAudio is iOS-native only");
+      },
+      async stop() {},
+      async pause() {},
+      async resume() {},
+      async setGapMs() {},
+      async isPlaying() {
+        return { playing: false, queueLength: 0 };
+      },
+      async addListener() {
+        return { remove() {} };
+      },
+    }) as BackgroundAudioPlugin,
+});
 
 export function isNativeIosAudio(): boolean {
   return (
@@ -38,6 +56,17 @@ export function isNativeIosAudio(): boolean {
     Capacitor.isNativePlatform() &&
     Capacitor.getPlatform() === "ios"
   );
+}
+
+/** Probe whether the native plugin actually loaded (not just platform check). */
+export async function nativeIosAudioAvailable(): Promise<boolean> {
+  if (!isNativeIosAudio()) return false;
+  try {
+    await BackgroundAudio.isPlaying();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {

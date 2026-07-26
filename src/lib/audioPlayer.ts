@@ -1,5 +1,6 @@
 import {
   isNativeIosAudio,
+  nativeIosAudioAvailable,
   playNativeQueue,
   stopNativeAudio,
 } from "./backgroundAudio";
@@ -472,7 +473,8 @@ export class MobileAudioPlayer {
     const gen = this.generation;
 
     // —— Native iOS path (reliable background via AVAudioPlayer) ——
-    if (isNativeIosAudio()) {
+    // Probe the plugin; if registration failed, fall back to WebAudio/HTML.
+    if (isNativeIosAudio() && (await nativeIosAudioAvailable())) {
       const clips: {
         buffer: ArrayBuffer;
         mimeType?: string;

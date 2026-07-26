@@ -59,12 +59,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDe
         }
     }
 
-    @objc func setGapMs(_ call: CAPPluginCall) {
+    @objc public func setGapMs(_ call: CAPPluginCall) {
         defaultGapMs = max(0, call.getDouble("ms") ?? 50)
         call.resolve()
     }
 
-    @objc func enqueue(_ call: CAPPluginCall) {
+    @objc public func enqueue(_ call: CAPPluginCall) {
         guard let b64 = call.getString("base64"), !b64.isEmpty else {
             call.reject("base64 required")
             return
@@ -91,12 +91,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDe
         call.resolve(["id": id])
     }
 
-    @objc func stop(_ call: CAPPluginCall) {
+    @objc public func stop(_ call: CAPPluginCall) {
         clearAll()
         call.resolve()
     }
 
-    @objc func pause(_ call: CAPPluginCall) {
+    @objc public func pause(_ call: CAPPluginCall) {
         player?.pause()
         if #available(iOS 13.0, *) {
             MPNowPlayingInfoCenter.default().playbackState = .paused
@@ -105,7 +105,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDe
         call.resolve()
     }
 
-    @objc func resume(_ call: CAPPluginCall) {
+    @objc public func resume(_ call: CAPPluginCall) {
         activateSession()
         if let player = player, !player.isPlaying {
             player.play()
@@ -119,7 +119,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDe
         call.resolve()
     }
 
-    @objc func isPlaying(_ call: CAPPluginCall) {
+    @objc public func isPlaying(_ call: CAPPluginCall) {
         let playing = player?.isPlaying == true
         call.resolve(["playing": playing, "queueLength": queueCount(), "currentId": currentId as Any])
     }
