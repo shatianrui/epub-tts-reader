@@ -44,7 +44,7 @@ function advancePos(
   return null;
 }
 
-const PREFETCH_AHEAD = 2;
+const PREFETCH_AHEAD = 3;
 
 export function Reader({
   book,
@@ -280,44 +280,48 @@ export function Reader({
 
           prefetchRef.current.delete(key);
 
-          setLoading(false);
-          setStatus(`朗读中 · ${ch.title}`);
-          await player.playPrepared(prepared);
-
-          if (!stillActive()) return;
-
-          // Configurable paragraph interval delay (default 0.1s, 0s = seamless)
-          const intervalMs = Math.max(
-            0,
-            (settings.paragraphInterval ?? 0.1) * 1000,
-          );
-          if (intervalMs > 0) {
-            await new Promise((r) => setTimeout(r, intervalMs));
-          }
-
-          if (!stillActive()) return;
-
+          // Resolve next position + gap before play so the audio clock can
+          // schedule paragraph pause / chapter pause gaplessly.
           const next = advancePos(book.chapters, pos);
-          if (!next) {
-            setStatus("全书朗读完成");
-            stop();
-            return;
-          }
+          let gapAfterMs = Math.max(
+            0,
+            (settings.paragraphInterval ?? 0.15) * 1000,
+          );
 
-          const isNewChapter = next.chapter !== pos.chapter;
-          if (isNewChapter) {
+          if (!next) {
+            gapAfterMs = 0;
+          } else if (next.chapter !== pos.chapter) {
             if (!settings.autoNextChapter) {
+              setLoading(false);
+              setStatus(`朗读中 · ${ch.title}`);
+              await player.playPrepared(prepared, { gapAfterMs: 0 });
+              if (!stillActive()) return;
               setStatus(`${ch.title} 朗读完成，点击继续下一章`);
               stop();
               return;
             }
             if (settings.chapterGap > 0) {
+              gapAfterMs = Math.max(gapAfterMs, settings.chapterGap * 1000);
               setStatus(`第 ${next.chapter + 1} 章即将开始…`);
-              await new Promise<void>((r) =>
-                setTimeout(r, settings.chapterGap * 1000),
-              );
-              if (!stillActive()) return;
             }
+          }
+
+          // Keep next paragraph warm while current audio plays
+          if (next) {
+            void ensurePrepared(next, player);
+            prefetchAhead(next, player);
+          }
+
+          setLoading(false);
+          setStatus(`朗读中 · ${ch.title}`);
+          await player.playPrepared(prepared, { gapAfterMs });
+
+          if (!stillActive()) return;
+
+          if (!next) {
+            setStatus("全书朗读完成");
+            stop();
+            return;
           }
 
           pos = next;

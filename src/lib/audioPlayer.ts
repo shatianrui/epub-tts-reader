@@ -6,37 +6,60 @@ type AudioWindow = Window & {
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
-/**
- * Extra wait after a clip is considered finished.
- * Covers MP3 decoder padding / early `ended` quirks so the last
- * syllables are heard before the reader advances.
- */
-const TAIL_PAD_MS = 450;
+/** Look-ahead when scheduling on AudioContext timeline (seconds). */
+const SCHEDULE_AHEAD_SEC = 0.04;
+
+/** Short crossfade hides MP3 encoder padding / click at joins. */
+const CROSSFADE_SEC = 0.014;
+
+/** Tail pad when duration comes from decoded PCM / API timestamps. */
+const TAIL_PAD_TRUSTED_MS = 40;
+
+/** Tail pad when duration is only a byte-rate estimate (HTML / early ended). */
+const TAIL_PAD_ESTIMATE_MS = 280;
 
 /** Never trust an `ended` that fires before this fraction of expected duration. */
 const EARLY_END_RATIO = 0.92;
 
-export type PreparedAudio = {
+export type DurationTrust = "decoded" | "api" | "estimate";
+
+export type PreparedClip = {
   kind: "decoded";
   audioBuffer: AudioBuffer;
   raw: ArrayBuffer;
   durationSec: number;
   mimeType: string;
+  trust: DurationTrust;
 } | {
   kind: "raw";
   buffer: ArrayBuffer;
   durationSec?: number;
   mimeType: string;
-} | {
-  kind: "sequence";
-  parts: Exclude<PreparedAudio, { kind: "sequence" }>[];
-  durationSec: number;
+  trust: DurationTrust;
 };
+
+export type PreparedAudio =
+  | PreparedClip
+  | {
+      kind: "sequence";
+      parts: PreparedClip[];
+      durationSec: number;
+    };
 
 export type PrepareInput = {
   buffer: ArrayBuffer;
   durationSec?: number;
   mimeType?: string;
+  /** True when durationSec came from TTS API / timestamps. */
+  durationTrusted?: boolean;
+};
+
+export type PlayPreparedOptions = {
+  /**
+   * Silence after this clip/sequence before the play promise resolves.
+   * Scheduled on the audio clock for Web Audio (true gapless handoff).
+   */
+  gapAfterMs?: number;
 };
 
 export type MediaSessionHandlers = {
@@ -54,11 +77,8 @@ function getAudioContextConstructor(): typeof AudioContext | undefined {
 /** Rough MP3 duration from byte length (assumes ~128 kbps CBR). */
 function estimateMp3DurationSec(bytes: ArrayBuffer): number {
   if (!bytes || bytes.byteLength < 256) return 0;
-  // MiniMax uses 128kbps; Grok often similar. Use 128kbps as baseline,
-  // and a slightly slower 96kbps estimate so we wait a bit longer if unsure.
   const sec128 = (bytes.byteLength * 8) / 128_000;
   const sec96 = (bytes.byteLength * 8) / 96_000;
-  // Prefer the longer estimate as a floor (safer against early advance).
   return Math.max(sec128, sec96 * 0.85);
 }
 
@@ -74,22 +94,41 @@ function pickDurationFloor(
   return Math.max(...candidates);
 }
 
+function flattenPrepared(prepared: PreparedAudio): PreparedClip[] {
+  if (prepared.kind === "sequence") return prepared.parts;
+  return [prepared];
+}
+
+function tailPadMs(trust: DurationTrust): number {
+  return trust === "estimate" ? TAIL_PAD_ESTIMATE_MS : TAIL_PAD_TRUSTED_MS;
+}
+
+function maxTrust(parts: PreparedClip[]): DurationTrust {
+  if (parts.some((p) => p.trust === "estimate")) return "estimate";
+  if (parts.some((p) => p.trust === "api")) return "api";
+  return "decoded";
+}
+
 /**
- * HTMLAudio-first player with a hard wall-clock gate.
- * Never advances to the next paragraph before the expected clip duration
- * has elapsed — even if the browser fires `ended` early on TTS MP3 blobs.
+ * Podcast-smooth player: Web Audio timeline scheduling for gapless joins,
+ * adaptive tail pads, and dual HTMLAudio elements as mobile fallback.
  */
 export class MobileAudioPlayer {
   private ctx: AudioContext | null = null;
-  private element: HTMLAudioElement | null = null;
-  private objectUrl: string | null = null;
+  private elements: HTMLAudioElement[] = [];
+  private activeEl = 0;
+  private objectUrls: (string | null)[] = [null, null];
   private unlocked = false;
   private playToken = 0;
-  /** Bumped by stop() so in-flight sequence loops exit. */
+  /** Bumped by stop() so in-flight loops exit. */
   private generation = 0;
   private settleCurrent: ((reason: "ended" | "stopped" | "error") => void) | null =
     null;
   private visibilityHandler: (() => void) | null = null;
+  /** AudioContext time when the current timeline is free for the next schedule. */
+  private timelineEnd = 0;
+  private activeSources: AudioBufferSourceNode[] = [];
+  private masterGain: GainNode | null = null;
 
   /** Call synchronously inside a click/touch handler. */
   unlock(): void {
@@ -97,21 +136,21 @@ export class MobileAudioPlayer {
     if (AC) {
       if (!this.ctx || this.ctx.state === "closed") {
         this.ctx = new AC();
+        this.masterGain = null;
       }
       void this.ctx.resume();
+      this.ensureMasterGain();
     }
 
-    if (!this.element) {
-      this.element = this.createElement();
-    }
-
-    this.element.src = SILENT_WAV;
-    const playPromise = this.element.play();
+    this.ensureElements();
+    const el = this.elements[0];
+    el.src = SILENT_WAV;
+    const playPromise = el.play();
     if (playPromise) {
       void playPromise
         .then(() => {
-          this.element?.pause();
-          if (this.element) this.element.currentTime = 0;
+          el.pause();
+          el.currentTime = 0;
         })
         .catch(() => {
           /* ignore */
@@ -122,9 +161,9 @@ export class MobileAudioPlayer {
       this.visibilityHandler = () => {
         if (document.visibilityState === "visible") {
           if (this.ctx) void this.ctx.resume();
-          // Keep HTMLAudio warm after returning to the tab
-          if (this.element && this.element.paused && this.settleCurrent) {
-            void this.element.play().catch(() => undefined);
+          const cur = this.elements[this.activeEl];
+          if (cur && cur.paused && this.settleCurrent) {
+            void cur.play().catch(() => undefined);
           }
         }
       };
@@ -134,14 +173,28 @@ export class MobileAudioPlayer {
     this.unlocked = true;
   }
 
+  private ensureMasterGain(): GainNode | null {
+    if (!this.ctx) return null;
+    if (!this.masterGain) {
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = 1;
+      this.masterGain.connect(this.ctx.destination);
+    }
+    return this.masterGain;
+  }
+
+  private ensureElements(): void {
+    while (this.elements.length < 2) {
+      this.elements.push(this.createElement());
+    }
+  }
+
   private createElement(): HTMLAudioElement {
     const el = new Audio();
     el.setAttribute("playsinline", "true");
     el.setAttribute("webkit-playsinline", "true");
     el.preload = "auto";
     el.setAttribute("x-webkit-airplay", "allow");
-    // Some mobile browsers only fire reliable media events when the
-    // element is in the document.
     if (typeof document !== "undefined" && !el.isConnected) {
       el.style.display = "none";
       el.setAttribute("aria-hidden", "true");
@@ -150,11 +203,17 @@ export class MobileAudioPlayer {
     return el;
   }
 
-  private revokeUrl(): void {
-    if (this.objectUrl) {
-      URL.revokeObjectURL(this.objectUrl);
-      this.objectUrl = null;
+  private revokeUrl(index: number): void {
+    const url = this.objectUrls[index];
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.objectUrls[index] = null;
     }
+  }
+
+  private revokeAllUrls(): void {
+    this.revokeUrl(0);
+    this.revokeUrl(1);
   }
 
   private finishPlayback(reason: "ended" | "stopped" | "error"): void {
@@ -163,11 +222,28 @@ export class MobileAudioPlayer {
     settle?.(reason);
   }
 
+  private stopSources(): void {
+    for (const source of this.activeSources) {
+      try {
+        source.onended = null;
+        source.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        source.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.activeSources = [];
+  }
+
   async prepare(
     input: ArrayBuffer | PrepareInput | Array<PrepareInput | ArrayBuffer>,
   ): Promise<PreparedAudio> {
     if (Array.isArray(input)) {
-      const parts: Exclude<PreparedAudio, { kind: "sequence" }>[] = [];
+      const parts: PreparedClip[] = [];
       for (const item of input) {
         const prepared = await this.prepare(item);
         if (prepared.kind === "sequence") {
@@ -186,6 +262,8 @@ export class MobileAudioPlayer {
     const buffer = input instanceof ArrayBuffer ? input : input.buffer;
     const hintDuration =
       input instanceof ArrayBuffer ? undefined : input.durationSec;
+    const durationTrusted =
+      input instanceof ArrayBuffer ? false : Boolean(input.durationTrusted);
     const mimeType =
       (input instanceof ArrayBuffer ? undefined : input.mimeType) ||
       "audio/mpeg";
@@ -193,16 +271,19 @@ export class MobileAudioPlayer {
     const byteEstimate = isWav ? 0 : estimateMp3DurationSec(buffer);
     const AC = getAudioContextConstructor();
     if (!AC) {
+      const durationSec = Math.max(hintDuration || 0, byteEstimate) || undefined;
       return {
         kind: "raw",
         buffer,
-        durationSec: Math.max(hintDuration || 0, byteEstimate) || undefined,
+        durationSec,
         mimeType,
+        trust: durationTrusted && hintDuration ? "api" : "estimate",
       };
     }
 
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new AC();
+      this.masterGain = null;
     }
     if (this.ctx.state === "suspended") {
       await this.ctx.resume().catch(() => undefined);
@@ -210,18 +291,24 @@ export class MobileAudioPlayer {
 
     try {
       const decoded = await this.ctx.decodeAudioData(buffer.slice(0));
-      // Prefer API duration when present; never trust Infinity from Safari blobs.
       const durationSec = Math.max(
         hintDuration || 0,
         decoded.duration,
         byteEstimate,
       );
+      const trust: DurationTrust =
+        decoded.duration > 0
+          ? "decoded"
+          : durationTrusted && hintDuration
+            ? "api"
+            : "estimate";
       return {
         kind: "decoded",
         audioBuffer: decoded,
         raw: buffer,
         durationSec,
         mimeType,
+        trust,
       };
     } catch {
       return {
@@ -229,154 +316,187 @@ export class MobileAudioPlayer {
         buffer,
         durationSec: Math.max(hintDuration || 0, byteEstimate) || undefined,
         mimeType,
+        trust: durationTrusted && hintDuration ? "api" : "estimate",
       };
     }
   }
 
-  async playPrepared(prepared: PreparedAudio): Promise<void> {
+  async playPrepared(
+    prepared: PreparedAudio,
+    opts: PlayPreparedOptions = {},
+  ): Promise<void> {
     if (!this.unlocked) {
       throw new Error(
         "请先点击「继续朗读」按钮开始播放（手机浏览器需要手动触发声音）",
       );
     }
 
-    if (prepared.kind === "sequence") {
-      const gen = this.generation;
-      for (let i = 0; i < prepared.parts.length; i++) {
-        if (this.generation !== gen) return;
-        await this.playPrepared(prepared.parts[i]);
-        if (this.generation !== gen) return;
-        if (i < prepared.parts.length - 1) {
-          await new Promise<void>((r) => setTimeout(r, 120));
-        }
+    const gapAfterMs = Math.max(0, opts.gapAfterMs ?? 0);
+    const parts = flattenPrepared(prepared);
+    if (parts.length === 0) return;
+
+    const allDecoded =
+      parts.every((p) => p.kind === "decoded") &&
+      !!this.ctx &&
+      this.ctx.state !== "closed";
+
+    if (allDecoded) {
+      if (this.ctx!.state === "suspended") {
+        await this.ctx!.resume().catch(() => undefined);
       }
-      return;
+      if (this.ctx!.state === "running") {
+        const ok = await this.playDecodedTimeline(
+          parts as Extract<PreparedClip, { kind: "decoded" }>[],
+          gapAfterMs,
+        );
+        if (ok) return;
+      }
     }
 
-    this.finishPlayback("stopped");
-    const token = ++this.playToken;
-    const knownDuration = prepared.durationSec ?? 0;
-
-    // Prefer Web Audio for decoded WAV/MP3 — Safari blob HTMLAudio often
-    // reports duration=Infinity and fires ended early.
-    if (prepared.kind === "decoded" && this.ctx) {
-      const ok = await this.playDecodedWithGate(
-        prepared.audioBuffer,
-        knownDuration,
+    // HTMLAudio path (single or multi-part with dual-element handoff)
+    const gen = this.generation;
+    for (let i = 0; i < parts.length; i++) {
+      if (this.generation !== gen) return;
+      const part = parts[i];
+      const isLast = i === parts.length - 1;
+      const partGap = isLast ? gapAfterMs : 0;
+      const raw = part.kind === "decoded" ? part.raw : part.buffer;
+      const token = ++this.playToken;
+      await this.playHtmlWithGate(
+        raw,
+        part.durationSec ?? 0,
+        part.mimeType || "audio/mpeg",
+        part.trust,
         token,
+        partGap,
       );
-      if (ok) return;
     }
-
-    const raw =
-      prepared.kind === "decoded" ? prepared.raw : prepared.buffer;
-    await this.playHtmlWithGate(
-      raw,
-      knownDuration,
-      prepared.mimeType || "audio/mpeg",
-      token,
-    );
   }
 
   /**
-   * Play a decoded buffer via AudioBufferSourceNode, but still enforce a
-   * wall-clock floor so early onended (context interrupts) cannot advance.
-   * @returns false if Web Audio path could not start (caller should fall back)
+   * Schedule decoded buffers back-to-back on the AudioContext clock with a
+   * short crossfade. gapAfterMs is included in the waited timeline so the
+   * next playPrepared call can start exactly when the pause ends.
    */
-  private async playDecodedWithGate(
-    audioBuffer: AudioBuffer,
-    knownDuration: number,
-    token: number,
+  private async playDecodedTimeline(
+    parts: Extract<PreparedClip, { kind: "decoded" }>[],
+    gapAfterMs: number,
   ): Promise<boolean> {
-    if (!this.ctx || this.ctx.state === "closed") return false;
-    if (this.ctx.state === "suspended") {
-      await this.ctx.resume().catch(() => undefined);
+    if (!this.ctx || this.ctx.state !== "running") return false;
+    const gainMaster = this.ensureMasterGain();
+    if (!gainMaster) return false;
+
+    this.finishPlayback("stopped");
+    const token = ++this.playToken;
+    const gen = this.generation;
+
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    // Continue from previous timeline when still in the future (gapless chain).
+    const chaining = this.timelineEnd > now + 0.001;
+    if (!chaining) {
+      this.stopSources();
     }
-    if (!this.ctx || this.ctx.state !== "running") {
+    let t = chaining ? this.timelineEnd : now + SCHEDULE_AHEAD_SEC;
+    const fade = CROSSFADE_SEC;
+
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        const audioBuffer = parts[i].audioBuffer;
+        const dur = Math.max(audioBuffer.duration, parts[i].durationSec || 0);
+        if (dur <= 0) continue;
+
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        const gain = ctx.createGain();
+        source.connect(gain);
+        gain.connect(gainMaster);
+
+        const startAt = i === 0 ? t : Math.max(t - fade, now);
+        const fadeInEnd = startAt + Math.min(fade, dur * 0.25);
+        const fadeOutStart = startAt + Math.max(dur - fade, dur * 0.5);
+
+        gain.gain.setValueAtTime(i === 0 ? 1 : 0.0001, startAt);
+        if (i > 0) {
+          gain.gain.linearRampToValueAtTime(1, fadeInEnd);
+        }
+        if (i < parts.length - 1 && dur > fade * 2) {
+          gain.gain.setValueAtTime(1, fadeOutStart);
+          gain.gain.linearRampToValueAtTime(0.0001, startAt + dur);
+        }
+
+        source.onended = () => {
+          this.activeSources = this.activeSources.filter((s) => s !== source);
+          try {
+            source.disconnect();
+          } catch {
+            /* ignore */
+          }
+        };
+        source.start(startAt);
+        this.activeSources.push(source);
+
+        t = startAt + dur;
+      }
+    } catch {
+      this.stopSources();
       return false;
     }
 
-    const expectedSec = Math.max(
-      knownDuration,
-      audioBuffer.duration,
-      0,
-    );
-    const startedAt = performance.now();
+    if (this.activeSources.length === 0) return false;
 
-    const outcome = await new Promise<"ended" | "stopped" | "error" | "fail">(
+    const trust = maxTrust(parts);
+    const padSec = tailPadMs(trust) / 1000;
+    const gapSec = gapAfterMs / 1000;
+    // Next clip may schedule at timelineEnd — keep gap on the audio clock.
+    this.timelineEnd = t + gapSec;
+    // Gapless handoff: resolve slightly before audio ends when no pause, so the
+    // next playPrepared can schedule on the same timeline with crossfade.
+    // With a pause, resolve when the silence ends (no extra pad stacked).
+    const waitUntil =
+      gapSec > 0
+        ? this.timelineEnd
+        : Math.max(t - SCHEDULE_AHEAD_SEC, t + padSec - SCHEDULE_AHEAD_SEC * 2);
+
+    const outcome = await new Promise<"ended" | "stopped" | "error">(
       (resolve) => {
         let finished = false;
-        let source: AudioBufferSourceNode | null = null;
-        let padTimer: number | null = null;
-        let gate = 0;
-
-        const done = (reason: "ended" | "stopped" | "error" | "fail") => {
+        const done = (reason: "ended" | "stopped" | "error") => {
           if (finished) return;
           finished = true;
-          if (padTimer != null) window.clearTimeout(padTimer);
           window.clearInterval(gate);
           this.settleCurrent = null;
-          if (source) {
-            try {
-              source.onended = null;
-              source.stop();
-            } catch {
-              /* ignore */
-            }
-            try {
-              source.disconnect();
-            } catch {
-              /* ignore */
-            }
-            source = null;
-          }
           resolve(reason);
         };
+        this.settleCurrent = done;
 
-        this.settleCurrent = (reason) => done(reason);
-
-        try {
-          source = this.ctx!.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(this.ctx!.destination);
-          source.onended = () => {
-            if (token !== this.playToken) {
-              done("stopped");
-              return;
-            }
-            const elapsed = (performance.now() - startedAt) / 1000;
-            const need = expectedSec * EARLY_END_RATIO;
-            if (expectedSec > 0 && elapsed < need) {
-              // Early onended — wait out the remaining wall-clock time
-              const waitMs =
-                Math.max(0, expectedSec - elapsed) * 1000 + TAIL_PAD_MS;
-              padTimer = window.setTimeout(() => done("ended"), waitMs);
-              return;
-            }
-            padTimer = window.setTimeout(() => done("ended"), TAIL_PAD_MS);
-          };
-          source.start(0);
-        } catch {
-          done("fail");
-          return;
-        }
-
-        gate = window.setInterval(() => {
-          if (token !== this.playToken) {
+        const gate = window.setInterval(() => {
+          if (token !== this.playToken || this.generation !== gen) {
             done("stopped");
             return;
           }
-          const elapsed = (performance.now() - startedAt) / 1000;
-          if (expectedSec > 0 && elapsed >= expectedSec + TAIL_PAD_MS / 1000) {
+          if (!this.ctx || this.ctx.state === "closed") {
+            done("error");
+            return;
+          }
+          // Keep context alive in background tabs
+          if (this.ctx.state === "suspended") {
+            void this.ctx.resume().catch(() => undefined);
+          }
+          if (this.ctx.currentTime >= waitUntil - 0.005) {
             done("ended");
           }
-        }, 80);
+        }, 24);
       },
     );
 
-    if (outcome === "fail") return false;
-    if (token !== this.playToken || outcome === "stopped") return true;
+    if (token !== this.playToken || outcome === "stopped") {
+      return true;
+    }
     if (outcome === "error") throw new Error("音频播放失败");
+
+    // Keep timelineEnd for the next gapless schedule. Sources self-remove onended
+    // so early handoff can crossfade into the next clip.
     return true;
   }
 
@@ -384,24 +504,37 @@ export class MobileAudioPlayer {
     buffer: ArrayBuffer,
     knownDuration: number,
     mimeType: string,
+    trust: DurationTrust,
     token: number,
+    gapAfterMs: number,
   ): Promise<void> {
-    if (!this.element) {
-      this.element = this.createElement();
+    this.ensureElements();
+    this.finishPlayback("stopped");
+
+    this.activeEl = this.activeEl ^ 1;
+    const el = this.elements[this.activeEl];
+    const other = this.elements[this.activeEl ^ 1];
+    if (other && !other.paused) {
+      try {
+        other.pause();
+      } catch {
+        /* ignore */
+      }
     }
 
-    const el = this.element;
     el.pause();
-    this.revokeUrl();
+    this.revokeUrl(this.activeEl);
     const blob = new Blob([buffer], { type: mimeType || "audio/mpeg" });
-    this.objectUrl = URL.createObjectURL(blob);
-    el.src = this.objectUrl;
+    const url = URL.createObjectURL(blob);
+    this.objectUrls[this.activeEl] = url;
+    el.src = url;
     el.load();
 
     const byteEstimate = /wav|wave/i.test(mimeType)
       ? 0
       : estimateMp3DurationSec(buffer);
     const startedAt = performance.now();
+    const padMs = tailPadMs(trust);
 
     await new Promise<void>((resolve) => {
       if (el.readyState >= 2) {
@@ -415,12 +548,11 @@ export class MobileAudioPlayer {
       };
       el.addEventListener("canplay", onReady);
       el.addEventListener("loadedmetadata", onReady);
-      window.setTimeout(resolve, 1200);
+      window.setTimeout(resolve, 800);
     });
 
     if (token !== this.playToken) return;
 
-    // Safari quirk: blob URL duration is often Infinity — ignore it.
     const safeElementDuration = () => {
       const d = el.duration;
       return Number.isFinite(d) && d > 0 && d < 60 * 60 * 6 ? d : 0;
@@ -459,7 +591,7 @@ export class MobileAudioPlayer {
           return floor > 0 ? floor * 1000 : 0;
         };
 
-        const tryFinish = (from: "ended" | "near-end" | "gate") => {
+        const tryFinish = () => {
           if (finished || token !== this.playToken) {
             if (token !== this.playToken) done("stopped");
             return;
@@ -475,12 +607,12 @@ export class MobileAudioPlayer {
             return;
           }
 
-          if (need > 0 && elapsed < need - 40) {
+          if (need > 0 && elapsed < need - 20) {
             if (padTimer == null) {
               padTimer = window.setTimeout(() => {
                 padTimer = null;
-                tryFinish(from);
-              }, Math.max(40, need - elapsed + TAIL_PAD_MS));
+                tryFinish();
+              }, Math.max(20, need - elapsed + padMs));
             }
             return;
           }
@@ -489,19 +621,19 @@ export class MobileAudioPlayer {
             padTimer = window.setTimeout(() => {
               padTimer = null;
               done("ended");
-            }, TAIL_PAD_MS);
+            }, padMs);
           }
         };
 
         const onEnded = () => {
           endedSignal = true;
-          tryFinish("ended");
+          tryFinish();
         };
 
         const onTimeUpdate = () => {
           const dur = safeElementDuration();
-          if (dur > 0 && el.currentTime >= dur - 0.08) {
-            tryFinish("near-end");
+          if (dur > 0 && el.currentTime >= dur - 0.05) {
+            tryFinish();
           }
         };
 
@@ -517,27 +649,27 @@ export class MobileAudioPlayer {
           const need = expectedMs();
           const elapsed = performance.now() - startedAt;
 
-          if (need > 0 && elapsed >= need + TAIL_PAD_MS) {
+          if (need > 0 && elapsed >= need + padMs) {
             if (
               endedSignal ||
               el.ended ||
               el.paused ||
               (safeElementDuration() > 0 &&
-                el.currentTime >= safeElementDuration() - 0.15)
+                el.currentTime >= safeElementDuration() - 0.12)
             ) {
               done("ended");
               return;
             }
-            if (elapsed >= need + 2500) {
+            if (elapsed >= need + 2000) {
               done("ended");
             }
             return;
           }
 
           if (need <= 0 && endedSignal) {
-            tryFinish("ended");
+            tryFinish();
           }
-        }, 50);
+        }, 40);
 
         el.addEventListener("ended", onEnded);
         el.addEventListener("error", onError);
@@ -558,6 +690,10 @@ export class MobileAudioPlayer {
 
     if (token !== this.playToken || outcome === "stopped") return;
     if (outcome === "error") throw new Error("音频播放失败");
+
+    if (gapAfterMs > 0 && token === this.playToken) {
+      await new Promise<void>((r) => setTimeout(r, gapAfterMs));
+    }
   }
 
   async playArrayBuffer(buffer: ArrayBuffer): Promise<void> {
@@ -568,21 +704,25 @@ export class MobileAudioPlayer {
   stop(): void {
     this.generation += 1;
     this.playToken += 1;
+    this.timelineEnd = 0;
     this.finishPlayback("stopped");
-    if (this.element) {
-      this.element.pause();
-      this.element.removeAttribute("src");
+    this.stopSources();
+    for (const el of this.elements) {
       try {
-        this.element.load();
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
       } catch {
         /* ignore */
       }
     }
-    this.revokeUrl();
+    this.revokeAllUrls();
   }
 
   isPlaying(): boolean {
-    return !!this.element && !this.element.paused && !this.element.ended;
+    const el = this.elements[this.activeEl];
+    if (el && !el.paused && !el.ended) return true;
+    return this.activeSources.length > 0;
   }
 }
 

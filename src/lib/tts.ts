@@ -287,6 +287,8 @@ export type SynthesizedSpeech = {
   /** Authoritative duration from the TTS API when available. */
   durationSec?: number;
   mimeType?: string;
+  /** True when durationSec is from API timestamps / known-good clock. */
+  durationTrusted?: boolean;
 };
 
 async function synthesizeMiniMax(
@@ -402,7 +404,12 @@ async function synthesizeMiniMax(
     throw new Error("解码 TTS 音频数据失败");
   }
   const durationSec = (buffer.byteLength * 8) / 128_000;
-  return { buffer, durationSec, mimeType: "audio/mpeg" };
+  return {
+    buffer,
+    durationSec,
+    mimeType: "audio/mpeg",
+    durationTrusted: false,
+  };
 }
 
 type GrokJsonPayload = {
@@ -502,7 +509,12 @@ async function synthesizeGrokChunk(
         : usePreferred
           ? "audio/wav"
           : "audio/mpeg";
-    return { buffer, durationSec, mimeType };
+    return {
+      buffer,
+      durationSec,
+      mimeType,
+      durationTrusted: typeof durationSec === "number" && durationSec > 0,
+    };
   }
 
   const mimeType = contentType.includes("audio/")
@@ -510,7 +522,7 @@ async function synthesizeGrokChunk(
     : usePreferred
       ? "audio/wav"
       : "audio/mpeg";
-  return { buffer: await res.arrayBuffer(), mimeType };
+  return { buffer: await res.arrayBuffer(), mimeType, durationTrusted: false };
 }
 
 /**
