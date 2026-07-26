@@ -290,11 +290,6 @@ export function Reader({
 
           if (!stillActive()) return;
 
-          // Brief breath between paragraphs so the last syllables are never
-          // overlapped by the next clip starting immediately.
-          await new Promise<void>((r) => setTimeout(r, 150));
-          if (!stillActive()) return;
-
           const next = advancePos(book.chapters, pos);
           if (!next) {
             setStatus("全书朗读完成");
