@@ -31,6 +31,7 @@ export interface AppSettings {
   voiceId: string;
   model: string;
   speed: number;
+  paragraphInterval: number;
   languageBoost: string;
 }
 
@@ -48,6 +49,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceId: "Chinese (Mandarin)_News_Anchor",
   model: "speech-2.8-turbo",
   speed: 1,
+  paragraphInterval: 0.1,
   languageBoost: "Chinese",
 };
 

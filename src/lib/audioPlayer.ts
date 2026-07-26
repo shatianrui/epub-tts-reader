@@ -83,12 +83,19 @@ export class MobileAudioPlayer {
 
   /** Decode ahead of time so playback can start with almost no gap. */
   async prepare(buffer: ArrayBuffer): Promise<PreparedAudio> {
+    if (!buffer || buffer.byteLength === 0) {
+      throw new Error("音频数据为空");
+    }
     if (this.ctx) {
       if (this.ctx.state === "suspended") {
         await this.ctx.resume();
       }
-      const audioBuffer = await this.ctx.decodeAudioData(buffer.slice(0));
-      return { kind: "decoded", audioBuffer };
+      try {
+        const audioBuffer = await this.ctx.decodeAudioData(buffer.slice(0));
+        return { kind: "decoded", audioBuffer };
+      } catch {
+        return { kind: "raw", buffer };
+      }
     }
     return { kind: "raw", buffer };
   }

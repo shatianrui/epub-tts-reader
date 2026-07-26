@@ -1,14 +1,38 @@
 import type { AppSettings, VoiceOption } from "./types";
 import { FALLBACK_VOICES } from "./types";
 
-export function hexToArrayBuffer(hex: string): ArrayBuffer {
-  const clean = hex.replace(/\s/g, "");
-  const len = clean.length / 2;
+export function isHexString(str: string): boolean {
+  const clean = str.replace(/\s/g, "");
+  return clean.length > 0 && clean.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(clean);
+}
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const clean = base64.replace(/[\r\n\s]/g, "");
+  const binaryString = atob(clean);
+  const len = binaryString.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
-    bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+    bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes.buffer;
+}
+
+export function hexToArrayBuffer(hex: string): ArrayBuffer {
+  const clean = hex.replace(/\s/g, "");
+  const len = Math.floor(clean.length / 2);
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16) || 0;
+  }
+  return bytes.buffer;
+}
+
+export function decodeAudioPayload(data: string): ArrayBuffer {
+  const clean = data.trim();
+  if (isHexString(clean)) {
+    return hexToArrayBuffer(clean);
+  }
+  return base64ToArrayBuffer(clean);
 }
 
 function buildUrl(apiBase: string, path: string, groupId?: string) {
@@ -97,14 +121,16 @@ export async function synthesizeSpeech(
   settings: AppSettings,
 ): Promise<ArrayBuffer> {
   if (!settings.apiKey?.trim()) {
-    throw new Error("请先在设置中填写 MiniMax Token Plan API Key");
+    throw new Error("请先在设置中填写 API Key");
   }
   if (!text?.trim()) {
     throw new Error("朗读文本为空");
   }
 
   const clipped = text.slice(0, 9000);
-  const res = await fetch(
+
+  // 1. Try MiniMax T2A v2 Endpoint
+  let res = await fetch(
     buildUrl(settings.apiBase, "/v1/t2a_v2", settings.groupId),
     {
       method: "POST",
@@ -134,29 +160,77 @@ export async function synthesizeSpeech(
     },
   );
 
+  // 2. Fallback to OpenAI / Grok / standard TTS endpoint if /v1/t2a_v2 is 404 or 405
+  if (res.status === 404 || res.status === 405) {
+    res = await fetch(buildUrl(settings.apiBase, "/v1/audio/speech"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${settings.apiKey.trim()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: settings.model || "tts-1",
+        input: clipped,
+        voice: settings.voiceId,
+        speed: settings.speed || 1,
+      }),
+    });
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+
+  // Direct binary audio response
+  if (
+    contentType.includes("audio/") ||
+    contentType.includes("application/octet-stream")
+  ) {
+    if (!res.ok) {
+      throw new Error(`TTS 请求失败 (${res.status})`);
+    }
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0) {
+      throw new Error("TTS 返回了空音频数据");
+    }
+    return buf;
+  }
+
+  // Parse JSON response
   const raw = await res.text();
-  let json: {
-    data?: { audio?: string };
-    base_resp?: { status_code?: number; status_msg?: string };
-  };
+  let json: Record<string, any>;
 
   try {
     json = JSON.parse(raw);
   } catch {
-    throw new Error(`MiniMax 返回非 JSON：${raw.slice(0, 200)}`);
+    if (res.ok && raw.length > 0) {
+      return new TextEncoder().encode(raw).buffer;
+    }
+    throw new Error(`TTS 返回非 JSON 响应：${raw.slice(0, 200)}`);
   }
 
   const statusCode = json.base_resp?.status_code ?? 0;
   if (!res.ok || statusCode !== 0) {
-    throw new Error(
-      json.base_resp?.status_msg || `MiniMax 请求失败 (${res.status})`,
-    );
+    const errorMsg =
+      json.base_resp?.status_msg ||
+      json.error?.message ||
+      json.message ||
+      `TTS 请求失败 (${res.status})`;
+    throw new Error(errorMsg);
   }
 
-  const audioHex = json.data?.audio;
-  if (!audioHex) {
-    throw new Error("MiniMax 未返回音频数据");
+  const audioStr =
+    json.data?.audio ||
+    json.audio ||
+    json.b64_json ||
+    json.data?.[0]?.b64_json;
+
+  if (!audioStr || typeof audioStr !== "string") {
+    throw new Error("TTS 未返回有效音频数据");
   }
 
-  return hexToArrayBuffer(audioHex);
+  const audioBuffer = decodeAudioPayload(audioStr);
+  if (audioBuffer.byteLength === 0) {
+    throw new Error("解码 TTS 音频数据失败");
+  }
+
+  return audioBuffer;
 }

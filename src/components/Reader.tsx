@@ -141,7 +141,7 @@ export function Reader({
   const playFrom = useCallback(
     async (startChapter: number, startParagraph: number) => {
       if (!settings.apiKey.trim()) {
-        setError("请先在设置中填写 MiniMax Token Plan API Key");
+        setError("请先在设置中填写 API Key");
         onOpenSettings();
         return;
       }
@@ -154,7 +154,7 @@ export function Reader({
       setChapterIndex(startChapter);
       setParagraphIndex(startParagraph);
       posRef.current = { chapter: startChapter, paragraph: startParagraph };
-      await persist(startChapter, startParagraph);
+      void persist(startChapter, startParagraph);
 
       let pos: Pos = { chapter: startChapter, paragraph: startParagraph };
 
@@ -187,7 +187,7 @@ export function Reader({
         setChapterIndex(pos.chapter);
         setParagraphIndex(pos.paragraph);
         posRef.current = pos;
-        await persist(pos.chapter, pos.paragraph);
+        void persist(pos.chapter, pos.paragraph);
 
         requestAnimationFrame(() => {
           document
@@ -197,16 +197,17 @@ export function Reader({
 
         const key = posKey(pos);
         const pending = ensurePrepared(pos, player);
-        // Only show "合成中" if audio is not ready yet
-        let settled = false;
+        prefetchAhead(pos, player);
+
+        let isReady = false;
         void pending.then(() => {
-          settled = true;
+          isReady = true;
         });
-        await Promise.race([
-          pending,
-          new Promise<void>((r) => setTimeout(r, 80)),
-        ]);
-        if (!settled && playingRef.current) {
+
+        // Give a tiny 30ms window to check if audio was already pre-fetched
+        await new Promise<void>((r) => setTimeout(r, 30));
+
+        if (!isReady && playingRef.current) {
           setLoading(true);
           setStatus(
             `合成中 · ${ch.title} · 段 ${pos.paragraph + 1}/${ch.paragraphs.length}`,
@@ -218,13 +219,24 @@ export function Reader({
           if (!playingRef.current) return;
 
           prefetchRef.current.delete(key);
-          prefetchAhead(pos, player);
 
           setLoading(false);
           setStatus(`朗读中 · ${ch.title}`);
           await player.playPrepared(prepared);
 
           if (!playingRef.current) return;
+
+          // Configurable paragraph interval delay (default 0.1s, 0s = seamless)
+          const intervalMs = Math.max(
+            0,
+            (settings.paragraphInterval ?? 0.1) * 1000,
+          );
+          if (intervalMs > 0) {
+            await new Promise((r) => setTimeout(r, intervalMs));
+          }
+
+          if (!playingRef.current) return;
+
           const next = advancePos(book.chapters, pos);
           if (!next) {
             setStatus("全书朗读完成");

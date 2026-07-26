@@ -183,6 +183,24 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
             />
           </label>
 
+          <label className="field">
+            <span>段落朗读间隔：{(settings.paragraphInterval ?? 0.1).toFixed(1)} 秒</span>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={0.1}
+              value={settings.paragraphInterval ?? 0.1}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  paragraphInterval: Number(e.target.value),
+                }))
+              }
+            />
+            <small>设置段落与段落之间的停顿时间（设为 0 可实现无缝连续朗读）</small>
+          </label>
+
           {error && <p className="form-error">{error}</p>}
           {message && <p className="form-ok">{message}</p>}
         </div>
