@@ -3,15 +3,11 @@ import AVFoundation
 import Capacitor
 import WebKit
 
-/// Host for ListenPage native bridges. Attaches BackgroundAudioBridge to the
-/// WKWebView so TTS can use AVAudioPlayer without Capacitor plugin registration.
+/// Host for ListenPage native audio bridge.
+/// We use the direct WKScriptMessage bridge (BackgroundAudioBridge) exclusively
+/// for reliable AVAudioPlayer background/lockscreen TTS (avoids Capacitor
+/// local plugin registration flakiness).
 class MainViewController: CAPBridgeViewController {
-    override open func capacitorDidLoad() {
-        // Secondary path: Capacitor plugin registration (may be a no-op if
-        // packageClassList discovery fails — WK bridge is the primary path).
-        bridge?.registerPluginInstance(BackgroundAudioPlugin())
-    }
-
     override open func viewDidLoad() {
         super.viewDidLoad()
         attachAudioBridge()
@@ -19,7 +15,7 @@ class MainViewController: CAPBridgeViewController {
 
     override open func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Re-attach after webview is fully up (cap load order varies).
+        // Re-attach after webview is fully up.
         attachAudioBridge()
     }
 

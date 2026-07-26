@@ -28,10 +28,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -47,24 +47,6 @@ jobs:
 
       - name: Sync Capacitor iOS
         run: npx cap sync ios
-
-      # Ensure local BackgroundAudioPlugin is listed for ObjC class lookup
-      # (also registered manually in MainViewController.capacitorDidLoad).
-      - name: Register local iOS plugins
-        run: |
-          set -euo pipefail
-          python3 -c '
-          import json
-          from pathlib import Path
-          p = Path("ios/App/App/capacitor.config.json")
-          data = json.loads(p.read_text()) if p.exists() else {}
-          classes = set(data.get("packageClassList") or [])
-          classes.update({"BackgroundAudioPlugin", "App.BackgroundAudioPlugin"})
-          data["packageClassList"] = sorted(classes)
-          p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(json.dumps(data, indent=2) + "\n")
-          print("packageClassList =", data["packageClassList"])
-          '
 
       # No Apple Developer account on CI — produce an ad-hoc-signed IPA
       # (Payload/*.app). Re-sign with Sideloadly / AltStore / TrollStore, or
@@ -154,7 +136,7 @@ jobs:
       # downloads in an outer .zip. Naming the artifact "Foo.ipa" makes browsers
       # save the outer zip as Foo.ipa, which is NOT a valid IPA.
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ListenPage-iOS
           path: ios/App/build/dist/ListenPage.ipa

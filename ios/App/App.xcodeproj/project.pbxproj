@@ -79,6 +79,8 @@
 				504EC3131FED79650016851F /* Info.plist */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
+				/* PrivacyInfo.xcprivacy (add manually in Xcode if not auto-included:
+				   drag into App group, ensure target membership + Copy Bundle Resources) */
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -112,12 +114,12 @@
 		504EC2FC1FED79650016851F /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				LastSwiftUpdateCheck = 0920;
-				LastUpgradeCheck = 0920;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					504EC3031FED79650016851F = {
-						CreatedOnToolsVersion = 9.2;
-						LastSwiftMigration = 1100;
+						CreatedOnToolsVersion = 16.0;
+						LastSwiftMigration = 1600;
 						ProvisioningStyle = Automatic;
 					};
 				};

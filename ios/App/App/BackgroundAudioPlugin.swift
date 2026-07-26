@@ -5,7 +5,8 @@ import MediaPlayer
 import UIKit
 
 /**
- * Native TTS playback queue for reliable iOS background / lock-screen audio.
+ * Legacy: Native TTS playback queue (kept for reference).
+ * Primary path is now BackgroundAudioBridge (WKScriptMessage direct attach).
  * WKWebView WebAudio is suspended when the app is backgrounded; AVAudioPlayer
  * continues under UIBackgroundModes=audio.
  */

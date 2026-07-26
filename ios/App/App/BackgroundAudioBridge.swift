@@ -5,10 +5,8 @@ import MediaPlayer
 import UIKit
 
 /**
- * Direct WKScriptMessageHandler bridge for background TTS.
- * Avoids Capacitor plugin auto-registration (local plugins often never
- * appear in PluginHeaders, which surfaces as
- * `"BackgroundAudio" plugin is not implemented on ios`).
+ * Direct WKScriptMessageHandler bridge for background TTS (PRIMARY on iOS).
+ * Avoids flaky Capacitor local plugin registration.
  *
  * JS API (window.ListenPageAudio):
  *   enqueue({ base64, id?, gapAfterMs? }) -> Promise
