@@ -1,0 +1,77 @@
+name: Build iOS IPA (unsigned)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "capacitor.config.ts"
+      - "ios/**"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.ts"
+      - ".github/workflows/build-ios-ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      - name: Sync Capacitor iOS
+        run: npx cap sync ios
+
+      # No Apple Developer account configured for this repo, so this
+      # produces an UNSIGNED .app / .ipa. It cannot be installed by
+      # AirDrop/`xcodebuild -exportArchive` directly — re-sign it locally
+      # with a free Apple ID via Sideloadly / AltStore (or open
+      # ios/App/App.xcworkspace in Xcode and Run to a connected device,
+      # which signs + installs in one step instead of using this artifact).
+      - name: Build unsigned .app
+        working-directory: ios/App
+        run: |
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: ios/App/build/Build/Products/Release-iphoneos
+        run: |
+          mkdir -p Payload
+          cp -r App.app Payload/
+          zip -r ListenPage-unsigned.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: listenpage-unsigned-ipa
+          path: ios/App/build/Build/Products/Release-iphoneos/ListenPage-unsigned.ipa
+          retention-days: 30

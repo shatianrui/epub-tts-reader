@@ -5,8 +5,12 @@ import type { AppSettings, ReadingProgress, StoredBook } from "@/lib/types";
 import { deleteBook, getProgress, listBooks, saveBook } from "@/lib/db";
 import { parseEpub } from "@/lib/epub";
 import { loadSettings } from "@/lib/settings";
+import { activeApiKeyConfigured } from "@/lib/tts";
 import { Reader } from "@/components/Reader";
 import { SettingsPanel } from "@/components/SettingsPanel";
+import { AuthPanel } from "@/components/AuthPanel";
+import { useAuth } from "@/lib/auth";
+import { syncAll, uploadBook, removeBookFromCloud } from "@/lib/sync";
 
 function formatDate(ts: number) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -18,6 +22,7 @@ function formatDate(ts: number) {
 }
 
 export function AppShell() {
+  const { user, isLoading: authLoading, signOut, configured } = useAuth();
   const [books, setBooks] = useState<StoredBook[]>([]);
   const [progressMap, setProgressMap] = useState<
     Record<string, ReadingProgress>
@@ -29,6 +34,11 @@ export function AppShell() {
   const [uploadError, setUploadError] = useState("");
   const [ready, setReady] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<"login" | "signup">("login");
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     const list = await listBooks();
@@ -44,10 +54,76 @@ export function AppShell() {
     setReady(true);
   }, []);
 
+  const handleSync = useCallback(async () => {
+    if (!user) return;
+    setSyncing(true);
+    setSyncMessage("");
+    let messageDelay = 3000;
+    try {
+      const result = await syncAll();
+      const parts: string[] = [];
+      if (result.booksSynced > 0) parts.push(`${result.booksSynced} 本书籍`);
+      if (result.progressSynced > 0) parts.push(`${result.progressSynced} 条进度`);
+      if (result.settingsSynced) parts.push("设置");
+
+      let msg = parts.length > 0 ? `已同步 ${parts.join("、")}` : "";
+      if (result.errors.length > 0) {
+        console.warn("同步错误:", result.errors);
+        const errSummary =
+          result.errors.length === 1
+            ? result.errors[0]
+            : `${result.errors[0]}（还有 ${result.errors.length - 1} 项失败，详见浏览器控制台）`;
+        msg = msg ? `${msg}；${errSummary}` : errSummary;
+        messageDelay = 8000;
+      } else if (!msg) {
+        msg = "数据已是最新";
+      }
+      setSyncMessage(msg);
+      await refresh();
+      // Keep React settings in sync after cloud merge / secret preserve.
+      setSettings(result.settings ?? loadSettings());
+    } catch (e) {
+      setSyncMessage(e instanceof Error ? e.message : "同步失败");
+      messageDelay = 8000;
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncMessage(""), messageDelay);
+    }
+  }, [user, refresh]);
+
   useEffect(() => {
     void refresh();
     setSettings(loadSettings());
   }, [refresh]);
+
+  useEffect(() => {
+    if (user && !authLoading) {
+      void handleSync();
+    }
+  }, [user, authLoading, handleSync]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const interval = setInterval(() => {
+      void handleSync();
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [user, handleSync]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void handleSync();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [user, handleSync]);
 
   async function handleFiles(files: FileList | File[]) {
     const file = Array.from(files).find((f) =>
@@ -76,6 +152,9 @@ export function AppShell() {
         updatedAt: now,
       };
       await saveBook(book);
+      if (user) {
+        void uploadBook(book);
+      }
       await refresh();
       setActiveBook(book);
     } catch (e) {
@@ -89,8 +168,31 @@ export function AppShell() {
     if (!confirm("确定删除这本电子书及其阅读进度？")) return;
     await deleteBook(id);
     if (activeBook?.id === id) setActiveBook(null);
+    if (user) {
+      void removeBookFromCloud(id);
+    }
     await refresh();
   }
+
+  function openLogin() {
+    setAuthModalMode("login");
+    setAuthModalOpen(true);
+    setUserMenuOpen(false);
+  }
+
+  function openSignup() {
+    setAuthModalMode("signup");
+    setAuthModalOpen(true);
+    setUserMenuOpen(false);
+  }
+
+  async function handleSignOut() {
+    await signOut();
+    setUserMenuOpen(false);
+  }
+
+  const userEmail = user?.email ?? "";
+  const userInitial = userEmail ? userEmail[0].toUpperCase() : "?";
 
   if (activeBook) {
     return (
@@ -110,6 +212,11 @@ export function AppShell() {
           onClose={() => setSettingsOpen(false)}
           onSaved={(s) => setSettings(s)}
         />
+        <AuthPanel
+          open={authModalOpen}
+          onClose={() => setAuthModalOpen(false)}
+          initialMode={authModalMode}
+        />
       </>
     );
   }
@@ -119,10 +226,76 @@ export function AppShell() {
       <header className="hero">
         <div className="hero-bg" aria-hidden />
         <div className="hero-inner">
-          <p className="brand">听页 ListenPage</p>
+          <div className="hero-top-bar">
+            <p className="brand">听页 ListenPage</p>
+            <div className="user-area">
+              {syncMessage && <span className="sync-message">{syncMessage}</span>}
+              {!configured ? (
+                <span className="user-loading" title="未配置 NEXT_PUBLIC_SUPABASE_URL">
+                  云端未配置
+                </span>
+              ) : authLoading ? (
+                <span className="user-loading">加载中…</span>
+              ) : user ? (
+                <div className="user-menu">
+                  <button
+                    type="button"
+                    className="user-avatar"
+                    onClick={() => setUserMenuOpen((v) => !v)}
+                    title={userEmail}
+                  >
+                    {userInitial}
+                  </button>
+                  {userMenuOpen && (
+                    <div className="user-dropdown">
+                      <div className="user-dropdown-header">
+                        <span className="user-email">{userEmail}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="dropdown-item"
+                        onClick={() => {
+                          void handleSync();
+                          setUserMenuOpen(false);
+                        }}
+                        disabled={syncing}
+                      >
+                        {syncing ? "同步中…" : "同步数据"}
+                      </button>
+                      <button
+                        type="button"
+                        className="dropdown-item danger"
+                        onClick={handleSignOut}
+                      >
+                        退出登录
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="auth-buttons">
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={openLogin}
+                  >
+                    登录
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={openSignup}
+                  >
+                    注册
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
           <h1>把 EPUB 变成可续听的有声书</h1>
           <p className="hero-sub">
             上传电子书，接入 MiniMax Token Plan 语音合成，记住进度、随时续读。
+            {user && " 登录后数据将同步到云端。"}
           </p>
           <div className="hero-actions">
             <label className="btn-primary upload-label">
@@ -146,8 +319,8 @@ export function AppShell() {
               配置 API / 语音
             </button>
           </div>
-          {!settings.apiKey && (
-            <p className="hero-hint">尚未配置 API Key，朗读前请先完成设置。</p>
+          {!activeApiKeyConfigured(settings) && (
+            <p className="hero-hint">尚未配置语音 API Key，朗读前请先完成设置。</p>
           )}
         </div>
       </header>
@@ -168,7 +341,10 @@ export function AppShell() {
             }
           }}
         >
-          <p>或将 .epub 拖放到此处 · 书籍会保存在本机浏览器中</p>
+          <p>
+            或将 .epub 拖放到此处 · 书籍会保存在本机浏览器中
+            {user && "，并同步到云端"}
+          </p>
         </section>
 
         {uploadError && <p className="form-error">{uploadError}</p>}
@@ -176,7 +352,19 @@ export function AppShell() {
         <section className="library">
           <div className="section-head">
             <h2>我的书库</h2>
-            <span>{ready ? `${books.length} 本` : "加载中…"}</span>
+            <div className="section-head-right">
+              {user && (
+                <button
+                  type="button"
+                  className="btn-sync"
+                  onClick={() => void handleSync()}
+                  disabled={syncing}
+                >
+                  {syncing ? "同步中…" : "同步"}
+                </button>
+              )}
+              <span>{ready ? `${books.length} 本` : "加载中…"}</span>
+            </div>
           </div>
 
           {ready && books.length === 0 && (
@@ -267,6 +455,11 @@ export function AppShell() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onSaved={(s) => setSettings(s)}
+      />
+      <AuthPanel
+        open={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        initialMode={authModalMode}
       />
     </div>
   );
