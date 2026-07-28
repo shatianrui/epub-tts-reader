@@ -12,7 +12,33 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         configureAudioSession()
         observeAudioSession()
         UIApplication.shared.beginReceivingRemoteControlEvents()
+        setupRemoteCommands()
         return true
+    }
+
+    private func setupRemoteCommands() {
+        let cc = MPRemoteCommandCenter.shared()
+        cc.playCommand.addTarget { _ in
+            // Delegate to the bridge (it will resume if possible)
+            BackgroundAudioBridge.shared.resumeIfNeeded()
+            return .success
+        }
+        cc.pauseCommand.addTarget { _ in
+            BackgroundAudioBridge.shared.pauseIfNeeded()
+            return .success
+        }
+        cc.togglePlayPauseCommand.addTarget { _ in
+            BackgroundAudioBridge.shared.togglePlayPause()
+            return .success
+        }
+        cc.nextTrackCommand.addTarget { _ in
+            BackgroundAudioBridge.shared.skipForward()
+            return .success
+        }
+        cc.previousTrackCommand.addTarget { _ in
+            BackgroundAudioBridge.shared.skipBackward()
+            return .success
+        }
     }
 
     /// Playback category + spokenAudio mode keeps TTS alive with the screen locked

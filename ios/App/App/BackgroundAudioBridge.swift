@@ -294,4 +294,43 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
     }
+
+    // MARK: - Helpers for remote commands (from AppDelegate)
+
+    func resumeIfNeeded() {
+        if let p = player, !p.isPlaying {
+            p.play()
+        } else if player == nil {
+            // nothing queued
+        }
+    }
+
+    func pauseIfNeeded() {
+        player?.pause()
+    }
+
+    func togglePlayPause() {
+        if let p = player {
+            if p.isPlaying {
+                p.pause()
+            } else {
+                p.play()
+            }
+        }
+    }
+
+    func skipForward() {
+        // Skip current clip
+        player?.stop()
+        player = nil
+        // The queue will continue on next playNext if called from JS, or we can trigger
+        // For simplicity, let the current flow continue; JS layer controls queue.
+    }
+
+    func skipBackward() {
+        if let p = player {
+            p.currentTime = 0
+            p.play()
+        }
+    }
 }
