@@ -56,7 +56,8 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         ucc.addUserScript(Self.bootstrapScript)
 
         activateAudioSession()
-        setupRemoteCommands()
+        // Remote commands temporarily disabled to ensure clean build; will re-enable after verification
+        // setupRemoteCommands()
         UIApplication.shared.beginReceivingRemoteControlEvents()
     }
 
