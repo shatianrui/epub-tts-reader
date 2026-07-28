@@ -5,24 +5,15 @@ import MediaPlayer
 import UIKit
 
 /**
- * Completely refactored background playback for iOS.
+ * Direct WKScriptMessageHandler bridge for background TTS (PRIMARY on iOS).
+ * Avoids flaky Capacitor local plugin registration.
  *
- * - Uses direct WKScriptMessage (reliable in background, survives JS throttling)
- * - AVAudioPlayer queue for encoded audio clips (base64 from JS TTS)
- * - Proper AVAudioSession with .playback + .spokenAudio
- * - Full MPRemoteCommandCenter support (lock screen / Control Center controls)
- * - Clean NowPlayingInfo updates
- * - Better interruption / route handling delegated to AppDelegate
- * - Single source of truth (legacy Capacitor plugin kept only for compatibility)
- *
- * JS bridge (injected): window.ListenPageAudio
- *   enqueue({ base64, id?, gapAfterMs? })
- *   stop(), pause(), resume(), isPlaying(), setGapMs({ms})
- *
- * Events dispatched as 'listenpage-audio' CustomEvent and window.__listenPageAudioEvent(name, data)
+ * JS API (window.ListenPageAudio):
+ *   enqueue({ base64, id?, gapAfterMs? }) -> Promise
+ *   stop() / pause() / resume() / isPlaying()
+ *   events via window.__listenPageAudioEvent(name, data)
  */
 final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlayerDelegate {
-
     static let handlerName = "listenPageAudio"
     static let shared = BackgroundAudioBridge()
 
@@ -36,29 +27,20 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
     private weak var webView: WKWebView?
     private var queue: [QueuedClip] = []
     private var player: AVAudioPlayer?
-    private var defaultGapMs: Double = 80
-    private var currentGapAfterMs: Double = 80
+    private var defaultGapMs: Double = 50
+    private var currentGapAfterMs: Double = 50
     private var gapWorkItem: DispatchWorkItem?
     private var currentId: String?
-    private let queueLock = NSLock()
-
-    // Remote controls
-    private var commandCenter: MPRemoteCommandCenter?
-
-    // For periodic NowPlaying elapsed updates (lightweight)
-    private var nowPlayingTimer: Timer?
+    private let lock = NSLock()
 
     func attach(to webView: WKWebView) {
         self.webView = webView
         let ucc = webView.configuration.userContentController
+        // Remove previous handler if re-attaching
         ucc.removeScriptMessageHandler(forName: Self.handlerName)
         ucc.add(self, name: Self.handlerName)
         ucc.addUserScript(Self.bootstrapScript)
-
-        activateAudioSession()
-        // Remote commands temporarily disabled to ensure clean build; will re-enable after verification
-        // setupRemoteCommands()
-        UIApplication.shared.beginReceivingRemoteControlEvents()
+        activateSession()
     }
 
     private static var bootstrapScript: WKUserScript {
@@ -110,8 +92,6 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         return WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
     }
 
-    // MARK: - Message handling
-
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == Self.handlerName,
               let body = message.body as? [String: Any],
@@ -126,10 +106,17 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
             clearAll()
             reply(requestId: requestId, result: [:])
         case "pause":
-            pausePlayback()
+            player?.pause()
+            emit("paused", [:])
             reply(requestId: requestId, result: [:])
         case "resume":
-            resumePlayback()
+            activateSession()
+            if let player = player, !player.isPlaying {
+                player.play()
+                emit("resumed", ["id": currentId as Any])
+            } else if player == nil {
+                playNext()
+            }
             reply(requestId: requestId, result: [:])
         case "setGapMs":
             if let ms = body["ms"] as? Double {
@@ -163,12 +150,12 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         if let g = body["gapAfterMs"] as? Double { gap = max(0, g) }
         else if let g = body["gapAfterMs"] as? Int { gap = max(0, Double(g)) }
 
-        activateAudioSession()
+        activateSession()
 
-        queueLock.lock()
+        lock.lock()
         let shouldStart = player == nil || player?.isPlaying != true
         queue.append(QueuedClip(id: id, data: data, gapAfterMs: gap, requestId: nil))
-        queueLock.unlock()
+        lock.unlock()
 
         emit("enqueued", ["id": id, "queueLength": queueCount()])
         reply(requestId: requestId, result: ["id": id])
@@ -178,80 +165,72 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         }
     }
 
-    // MARK: - Playback core (refactored queue)
-
     private func queueCount() -> Int {
-        queueLock.lock(); defer { queueLock.unlock() }
+        lock.lock(); defer { lock.unlock() }
         return queue.count
     }
 
     private func clearAll() {
-        cancelGap()
-        queueLock.lock(); queue.removeAll(); queueLock.unlock()
+        gapWorkItem?.cancel()
+        gapWorkItem = nil
+        lock.lock(); queue.removeAll(); lock.unlock()
         player?.stop()
         player = nil
         currentId = nil
-        stopNowPlayingTimer()
-        updateNowPlayingStopped()
         emit("stopped", [:])
     }
 
-    private func pausePlayback() {
-        player?.pause()
-        stopNowPlayingTimer()
-        updateNowPlayingPaused()
-        emit("paused", [:])
-    }
-
-    private func resumePlayback() {
-        activateAudioSession()
-        if let p = player, !p.isPlaying {
-            p.play()
-            startNowPlayingTimer()
-            updateNowPlayingPlaying()
-            emit("resumed", ["id": currentId as Any])
-        } else if player == nil {
-            playNext()
+    private func activateSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playback,
+                mode: .spokenAudio,
+                options: [.allowAirPlay, .allowBluetoothA2DP]
+            )
+            try session.setActive(true)
+        } catch {
+            NSLog("ListenPageAudio session error: \(error.localizedDescription)")
         }
     }
 
     private func playNext() {
-        cancelGap()
+        gapWorkItem?.cancel()
+        gapWorkItem = nil
 
-        queueLock.lock()
+        lock.lock()
         guard !queue.isEmpty else {
-            queueLock.unlock()
+            lock.unlock()
             player = nil
             currentId = nil
-            stopNowPlayingTimer()
-            updateNowPlayingStopped()
             emit("queueEmpty", [:])
             return
         }
         let clip = queue.removeFirst()
-        queueLock.unlock()
+        lock.unlock()
 
-        activateAudioSession()
+        activateSession()
 
         do {
             let p = try AVAudioPlayer(data: clip.data)
             p.delegate = self
             p.prepareToPlay()
-            p.volume = 1.0
-
+            p.volume = 1
             guard p.play() else {
-                emit("error", ["message": "AVAudioPlayer.play() returned false", "id": clip.id])
+                emit("error", ["message": "play() returned false", "id": clip.id])
                 DispatchQueue.main.async { [weak self] in self?.playNext() }
                 return
             }
-
             player = p
             currentId = clip.id
             currentGapAfterMs = clip.gapAfterMs
-
-            updateNowPlaying(for: p, id: clip.id)
-            startNowPlayingTimer()
-
+            var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+            info[MPMediaItemPropertyTitle] = "听页 ListenPage"
+            info[MPMediaItemPropertyArtist] = "EPUB 朗读"
+            info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+            info[MPMediaItemPropertyPlaybackDuration] = p.duration
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
             emit("trackStart", [
                 "id": clip.id,
                 "duration": p.duration,
@@ -263,181 +242,26 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         }
     }
 
-    // MARK: - AVAudioPlayerDelegate
-
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         let finishedId = currentId
         emit("trackEnded", ["id": finishedId as Any, "successfully": flag])
-
-        stopNowPlayingTimer()
-
         let delay = currentGapAfterMs / 1000.0
         if delay <= 0.001 {
             playNext()
             return
         }
-
-        let work = DispatchWorkItem { [weak self] in
-            self?.playNext()
-        }
+        let work = DispatchWorkItem { [weak self] in self?.playNext() }
         gapWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        emit("error", ["message": error?.localizedDescription ?? "decode error", "id": currentId as Any])
+        emit("error", [
+            "message": error?.localizedDescription ?? "decode error",
+            "id": currentId as Any,
+        ])
         playNext()
     }
-
-    // MARK: - Audio Session
-
-    private func activateAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.allowAirPlay, .allowBluetoothA2DP, .duckOthers]
-            )
-            try session.setActive(true, options: [])
-        } catch {
-            NSLog("ListenPageAudio session error: \(error.localizedDescription)")
-        }
-    }
-
-    // MARK: - Remote Command Center (Lock Screen / Control Center)
-
-    private func setupRemoteCommands() {
-        let cc = MPRemoteCommandCenter.shared()
-        commandCenter = cc
-
-        cc.playCommand.removeTarget(nil)
-        cc.playCommand.addTarget(self, action: #selector(handlePlayCommand(_:)))
-
-        cc.pauseCommand.removeTarget(nil)
-        cc.pauseCommand.addTarget(self, action: #selector(handlePauseCommand(_:)))
-
-        cc.togglePlayPauseCommand.removeTarget(nil)
-        cc.togglePlayPauseCommand.addTarget(self, action: #selector(handleTogglePlayPause(_:)))
-
-        cc.nextTrackCommand.removeTarget(nil)
-        cc.nextTrackCommand.addTarget(self, action: #selector(handleNextTrack(_:)))
-
-        cc.previousTrackCommand.removeTarget(nil)
-        cc.previousTrackCommand.addTarget(self, action: #selector(handlePreviousTrack(_:)))
-
-        cc.changePlaybackPositionCommand.isEnabled = false
-    }
-
-    @objc private func handlePlayCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        resumePlayback()
-        return .success
-    }
-
-    @objc private func handlePauseCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        pausePlayback()
-        return .success
-    }
-
-    @objc private func handleTogglePlayPause(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        if let p = player, p.isPlaying {
-            pausePlayback()
-        } else {
-            resumePlayback()
-        }
-        return .success
-    }
-
-    @objc private func handleNextTrack(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        skipToNext()
-        return .success
-    }
-
-    @objc private func handlePreviousTrack(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        skipToPrevious()
-        return .success
-    }
-
-    private func skipToNext() {
-        cancelGap()
-        player?.stop()
-        player = nil
-        emit("skipped", ["direction": "next"])
-        playNext()
-    }
-
-    private func skipToPrevious() {
-        // For simplicity: restart current clip. A full history stack can be added later.
-        cancelGap()
-        if let p = player {
-            p.currentTime = 0
-            p.play()
-            updateNowPlaying(for: p, id: currentId)
-            emit("skipped", ["direction": "previous"])
-        } else {
-            playNext()
-        }
-    }
-
-    // MARK: - Now Playing Info
-
-    private func updateNowPlaying(for player: AVAudioPlayer, id: String?) {
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-        info[MPMediaItemPropertyTitle] = "听页 ListenPage"
-        info[MPMediaItemPropertyArtist] = "EPUB 朗读"
-        info[MPNowPlayingInfoPropertyPlaybackRate] = player.isPlaying ? 1.0 : 0.0
-        info[MPMediaItemPropertyPlaybackDuration] = player.duration
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = player.currentTime
-        info[MPNowPlayingInfoPropertyMediaType] = NSNumber(value: MPNowPlayingInfoMediaType.audio.rawValue)
-        if let id = id {
-            info[MPMediaItemPropertyAlbumTitle] = id
-        }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        if #available(iOS 13.0, *) {
-            MPNowPlayingInfoCenter.default().playbackState = player.isPlaying ? .playing : .paused
-        }
-    }
-
-    private func updateNowPlayingPaused() {
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-        info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
-        if let p = player {
-            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
-        }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        if #available(iOS 13.0, *) {
-            MPNowPlayingInfoCenter.default().playbackState = .paused
-        }
-    }
-
-    private func updateNowPlayingStopped() {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        if #available(iOS 13.0, *) {
-            MPNowPlayingInfoCenter.default().playbackState = .stopped
-        }
-    }
-
-    private func startNowPlayingTimer() {
-        stopNowPlayingTimer()
-        nowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, let p = self.player, p.isPlaying else { return }
-            var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        }
-    }
-
-    private func stopNowPlayingTimer() {
-        nowPlayingTimer?.invalidate()
-        nowPlayingTimer = nil
-    }
-
-    private func cancelGap() {
-        gapWorkItem?.cancel()
-        gapWorkItem = nil
-    }
-
-    // MARK: - Messaging helpers
 
     private func reply(requestId: String?, result: [String: Any]? = nil, error: String? = nil) {
         guard let requestId = requestId else { return }
@@ -449,12 +273,13 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
 
     private func emit(_ name: String, _ data: [String: Any]) {
         eval("__listenPageAudioEvent", ["name": name, "data": data])
-
+        // Also call as function(name, data)
         DispatchQueue.main.async { [weak self] in
             guard let webView = self?.webView else { return }
             guard let dataJSON = try? JSONSerialization.data(withJSONObject: data, options: []),
                   let dataStr = String(data: dataJSON, encoding: .utf8) else { return }
-            let nameEsc = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            let nameEsc = name.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
             let js = "window.__listenPageAudioEvent && window.__listenPageAudioEvent('\(nameEsc)', \(dataStr));"
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
