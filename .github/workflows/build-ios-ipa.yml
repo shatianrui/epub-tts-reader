@@ -13,6 +13,7 @@ on:
       - "next.config.ts"
       - "tsconfig.json"
       - "postcss.config.mjs"
+      - "scripts/build-ios-ipa.sh"
       - ".github/workflows/build-ios-ipa.yml"
   workflow_dispatch:
 
@@ -41,6 +42,7 @@ jobs:
 
       - name: Build web app
         env:
+          NEXT_PUBLIC_BASE_PATH: ""
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         run: npm run build
@@ -48,89 +50,8 @@ jobs:
       - name: Sync Capacitor iOS
         run: npx cap sync ios
 
-      # No Apple Developer account on CI — produce an ad-hoc-signed IPA
-      # (Payload/*.app). Re-sign with Sideloadly / AltStore / TrollStore, or
-      # open ios/App in Xcode → Run on a device.
-      - name: Build iOS app
-        working-directory: ios/App
-        run: |
-          set -euo pipefail
-          xcodebuild \
-            -project App.xcodeproj \
-            -scheme App \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ONLY_ACTIVE_ARCH=NO \
-            build
-
-      - name: Package IPA
-        working-directory: ios/App
-        run: |
-          set -euo pipefail
-
-          APP_PATH="$(find build/Build/Products -name '*.app' -type d | head -n 1)"
-          if [[ -z "${APP_PATH}" || ! -d "${APP_PATH}" ]]; then
-            echo "ERROR: .app not found under build/Build/Products"
-            find build/Build/Products -maxdepth 4 -print || true
-            exit 1
-          fi
-          echo "Using app: ${APP_PATH}"
-          ls -la "${APP_PATH}"
-          test -f "${APP_PATH}/Info.plist"
-          EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP_PATH}/Info.plist")"
-          test -f "${APP_PATH}/${EXEC}"
-          test -d "${APP_PATH}/_CodeSignature" || true
-
-          STAGE="$(pwd)/build/ipa-stage"
-          DIST="$(pwd)/build/dist"
-          rm -rf "${STAGE}" "${DIST}"
-          mkdir -p "${STAGE}/Payload" "${DIST}"
-
-          APP_NAME="$(basename "${APP_PATH}")"
-          ditto "${APP_PATH}" "${STAGE}/Payload/${APP_NAME}"
-
-          # Ad-hoc sign so Sideloadly/AltStore see a real app bundle
-          codesign --force --deep --sign - "${STAGE}/Payload/${APP_NAME}"
-          codesign -dv --verbose=2 "${STAGE}/Payload/${APP_NAME}" 2>&1 | tee /tmp/codesign.txt || true
-          test -d "${STAGE}/Payload/${APP_NAME}/_CodeSignature"
-
-          IPA_PATH="${DIST}/ListenPage.ipa"
-          # Root of archive MUST be Payload/ (Apple IPA layout)
-          (
-            cd "${STAGE}"
-            # zip -y keeps symlinks; ditto also works — use both-validated zip
-            /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_PATH}"
-          )
-
-          echo "IPA bytes: $(wc -c < "${IPA_PATH}")"
-          file "${IPA_PATH}"
-          unzip -l "${IPA_PATH}" | head -n 50
-
-          # Hard fail unless this is a real IPA payload
-          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/Info\.plist' >/dev/null
-          unzip -l "${IPA_PATH}" | grep -E 'Payload/.+\.app/_CodeSignature/' >/dev/null
-          # Must NOT be a nested GitHub-style single-file wrapper
-          COUNT="$(unzip -l "${IPA_PATH}" | awk 'END{print $2}')"
-          echo "zip entries≈${COUNT}"
-          FILE_OUT="$(file -b "${IPA_PATH}")"
-          echo "file(1): ${FILE_OUT}"
-          echo "${FILE_OUT}" | grep -Ei 'iOS App Zip|Zip archive' >/dev/null
-
-          # Extract once to prove installers can open it
-          VERIFY="$(pwd)/build/ipa-verify"
-          rm -rf "${VERIFY}"
-          mkdir -p "${VERIFY}"
-          unzip -q "${IPA_PATH}" -d "${VERIFY}"
-          test -f "${VERIFY}/Payload/${APP_NAME}/Info.plist"
-          test -f "${VERIFY}/Payload/${APP_NAME}/${EXEC}"
-
-          echo "IPA_PATH=${IPA_PATH}" >> "$GITHUB_ENV"
-          echo "Packaged OK → ${IPA_PATH}"
+      - name: Build and package IPA
+        run: bash scripts/build-ios-ipa.sh
 
       # IMPORTANT: artifact *name* must NOT end in .ipa — Actions always wraps
       # downloads in an outer .zip. Naming the artifact "Foo.ipa" makes browsers

@@ -119,7 +119,7 @@ npm run android:release
 ```bash
 npm install
 npm run build:ios      # 构建网页并同步到 iOS 工程
-npm run cap:open:ios   # 或手动打开 ios/App/App.xcworkspace
+npm run cap:open:ios   # 或手动打开 ios/App/App.xcodeproj（SPM 工程，无 .xcworkspace）
 ```
 
 在 Xcode 里用 USB 连接 iPhone，Signing & Capabilities 里用你的免费 Apple ID 登录（Personal Team），选中你的设备点 Run，会自动签名并安装到手机。
@@ -128,12 +128,13 @@ npm run cap:open:ios   # 或手动打开 ios/App/App.xcworkspace
 
 ### 方式二：没有 Mac
 
-用不到 Xcode 也能装到自己手机上，思路是让 CI 出一个**未签名**的 IPA，再用第三方工具在你自己的电脑（Windows/Mac 均可）上用免费 Apple ID 重新签名安装：
+用不到 Xcode 也能装到自己手机上，思路是让 CI 出一个 **ad-hoc 签名**的 IPA，再用第三方工具在你自己的电脑（Windows/Mac 均可）上用免费 Apple ID 重新签名安装：
 
-1. 仓库里的 [Build iOS IPA](.github/workflows/build-ios-ipa.yml) 工作流会在 push 到 `main` 时自动跑（或在 Actions 页手动 **Run workflow**），产出 `listenpage-unsigned-ipa` 这个 Artifact（未签名 IPA，无法直接安装）。
-2. 下载后，用 [Sideloadly](https://sideloadly.io/)（或 AltStore）+ 你的免费 Apple ID，把这个未签名 IPA 重新签名并通过 USB 安装到 iPhone。
-3. 同样受限于免费签名 7 天过期，Sideloadly 支持定期重新签名刷新。
+1. 仓库里的 [Build iOS IPA](.github/workflows/build-ios-ipa.yml) 工作流会在 push 到 `main` 时自动跑（或在 Actions 页手动 **Run workflow**），产出 Artifact `ListenPage-iOS`，并滚动更新 Release `ios-latest` 里的直链资产 `ListenPage.ipa`。
+2. 优先下载 Release 里的 `ListenPage.ipa`；如果下载 Actions Artifact，注意外层还会被 GitHub 再包一层 zip，需要取出里面的 `ListenPage.ipa`。
+3. 用 [Sideloadly](https://sideloadly.io/)（或 AltStore）+ 你的免费 Apple ID，把这个 IPA 重新签名并通过 USB 安装到 iPhone。
+4. 同样受限于免费签名 7 天过期，Sideloadly 支持定期重新签名刷新。
 
 ### 正式签名 / 上架 App Store
 
-需要付费 Apple Developer 账号（$99/年），配置好证书、描述文件后，把 CI 里的 `CODE_SIGNING_ALLOWED=NO` 相关参数换成正式签名配置（或在 App Store Connect / TestFlight 走标准发布流程），这里不再展开。
+需要付费 Apple Developer 账号（$99/年）。当前 `scripts/build-ios-ipa.sh` 固定用 `CODE_SIGNING_ALLOWED=NO` 编译并做 ad-hoc 签名；正式签名/上架应改为使用证书与描述文件执行 `xcodebuild archive` + `xcodebuild -exportArchive`，或接入 Fastlane Match / App Store Connect / TestFlight 标准发布流程，这里不再展开。
