@@ -499,11 +499,12 @@ export class MobileAudioPlayer {
     await this.playWindow([{ prepared, gapAfterMs: opts.gapAfterMs }], {});
   }
 
-  /**
-   * Schedule several paragraphs for playback.
-   * On native iOS: AVAudioPlayer queue (true lock-screen / background audio).
-   * Elsewhere: Web Audio timeline batching, HTMLAudio fallback.
-   */
+    /**
+     * Schedule several paragraphs for playback.
+     * On native iOS (completely refactored): AVAudioPlayer queue + remote commands
+     * for true lock-screen / background / Control Center audio.
+     * Elsewhere: Web Audio timeline batching, HTMLAudio fallback.
+     */
   async playWindow(
     segments: TimelineSegment[],
     opts: PlayWindowOptions = {},

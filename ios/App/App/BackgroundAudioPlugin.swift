@@ -5,10 +5,9 @@ import MediaPlayer
 import UIKit
 
 /**
- * Legacy: Native TTS playback queue (kept for reference).
- * Primary path is now BackgroundAudioBridge (WKScriptMessage direct attach).
- * WKWebView WebAudio is suspended when the app is backgrounded; AVAudioPlayer
- * continues under UIBackgroundModes=audio.
+ * Legacy Capacitor plugin (kept for backward compatibility).
+ * Completely refactored background playback lives in BackgroundAudioBridge.swift
+ * (direct WKScriptMessage + AVAudioPlayer queue + MPRemoteCommandCenter).
  */
 @objc(BackgroundAudioPlugin)
 public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDelegate {

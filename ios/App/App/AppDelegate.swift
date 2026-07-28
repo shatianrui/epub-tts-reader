@@ -12,11 +12,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         configureAudioSession()
         observeAudioSession()
         UIApplication.shared.beginReceivingRemoteControlEvents()
-        // Ensures lock-screen / Control Center can show Now Playing for WKWebView TTS.
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-            MPMediaItemPropertyTitle: "听页 ListenPage",
-            MPMediaItemPropertyArtist: "EPUB 朗读",
-        ]
         return true
     }
 

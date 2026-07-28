@@ -103,7 +103,9 @@ function onNativeEvent(
 }
 
 /**
- * Play clips via native AVAudioPlayer queue (lock-screen / background safe).
+ * Play clips via the completely refactored native background engine
+ * (AVAudioPlayer queue + MPRemoteCommandCenter + proper session).
+ * Survives app backgrounding and lock screen.
  */
 export async function playNativeQueue(
   clips: NativeClip[],
