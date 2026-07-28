@@ -44,15 +44,29 @@ function getNativeApi(): ListenPageAudioApi | null {
   return window.ListenPageAudio ?? null;
 }
 
+/**
+ * Once confirmed, the bridge stays attached for the life of the page
+ * (bootstrap script is idempotent across MainViewController re-attaches).
+ * Cache the result so later calls — issued once per playback batch, often
+ * while the app is backgrounded — never depend on a fresh WKScriptMessage
+ * round-trip. A suspended/throttled WebContent process can stall or drop
+ * that round-trip, which previously made this helper time out and fall
+ * back to the JS/WebAudio path — the one path that cannot survive
+ * backgrounding — right after the app was backgrounded.
+ */
+let nativeAvailableCache: boolean | null = null;
+
 /** True when the WKWebView message bridge injected ListenPageAudio. */
 export async function nativeIosAudioAvailable(): Promise<boolean> {
   if (!isNativeIosAudio()) return false;
+  if (nativeAvailableCache !== null) return nativeAvailableCache;
   // Bootstrap script injects at document start; retry briefly if racey.
   for (let i = 0; i < 20; i++) {
     const api = getNativeApi();
     if (api?.isPlaying) {
       try {
         await api.isPlaying();
+        nativeAvailableCache = true;
         return true;
       } catch {
         /* keep trying */
@@ -60,6 +74,7 @@ export async function nativeIosAudioAvailable(): Promise<boolean> {
     }
     await new Promise((r) => setTimeout(r, 50));
   }
+  nativeAvailableCache = false;
   return false;
 }
 
