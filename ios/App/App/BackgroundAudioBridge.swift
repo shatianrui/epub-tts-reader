@@ -307,47 +307,54 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
     // MARK: - Remote Command Center (Lock Screen / Control Center)
 
     private func setupRemoteCommands() {
-        commandCenter = MPRemoteCommandCenter.shared()
-
-        // Play
         let cc = MPRemoteCommandCenter.shared()
         commandCenter = cc
 
         cc.playCommand.removeTarget(nil)
-        cc.playCommand.addTarget { [weak self] _ in
-            self?.resumePlayback()
-            return MPRemoteCommandHandlerStatus.success
-        }
+        cc.playCommand.addTarget(self, action: #selector(handlePlayCommand(_:)))
 
         cc.pauseCommand.removeTarget(nil)
-        cc.pauseCommand.addTarget { [weak self] _ in
-            self?.pausePlayback()
-            return MPRemoteCommandHandlerStatus.success
-        }
+        cc.pauseCommand.addTarget(self, action: #selector(handlePauseCommand(_:)))
 
         cc.togglePlayPauseCommand.removeTarget(nil)
-        cc.togglePlayPauseCommand.addTarget { [weak self] _ in
-            if let p = self?.player, p.isPlaying {
-                self?.pausePlayback()
-            } else {
-                self?.resumePlayback()
-            }
-            return MPRemoteCommandHandlerStatus.success
-        }
+        cc.togglePlayPauseCommand.addTarget(self, action: #selector(handleTogglePlayPause(_:)))
 
         cc.nextTrackCommand.removeTarget(nil)
-        cc.nextTrackCommand.addTarget { [weak self] _ in
-            self?.skipToNext()
-            return MPRemoteCommandHandlerStatus.success
-        }
+        cc.nextTrackCommand.addTarget(self, action: #selector(handleNextTrack(_:)))
 
         cc.previousTrackCommand.removeTarget(nil)
-        cc.previousTrackCommand.addTarget { [weak self] _ in
-            self?.skipToPrevious()
-            return MPRemoteCommandHandlerStatus.success
-        }
+        cc.previousTrackCommand.addTarget(self, action: #selector(handlePreviousTrack(_:)))
 
         cc.changePlaybackPositionCommand.isEnabled = false
+    }
+
+    @objc private func handlePlayCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        resumePlayback()
+        return .success
+    }
+
+    @objc private func handlePauseCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        pausePlayback()
+        return .success
+    }
+
+    @objc private func handleTogglePlayPause(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        if let p = player, p.isPlaying {
+            pausePlayback()
+        } else {
+            resumePlayback()
+        }
+        return .success
+    }
+
+    @objc private func handleNextTrack(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        skipToNext()
+        return .success
+    }
+
+    @objc private func handlePreviousTrack(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        skipToPrevious()
+        return .success
     }
 
     private func skipToNext() {
