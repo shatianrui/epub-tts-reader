@@ -180,6 +180,51 @@ function flattenPrepared(prepared: PreparedAudio): PreparedClip[] {
   return [prepared];
 }
 
+/** Encode a (silence-trimmed) AudioBuffer to 16-bit PCM WAV bytes. */
+function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const numFrames = buffer.length;
+  const blockAlign = numChannels * 2;
+  const dataSize = numFrames * blockAlign;
+  const out = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(out);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < numChannels; c++) channels.push(buffer.getChannelData(c));
+
+  let offset = 44;
+  for (let i = 0; i < numFrames; i++) {
+    for (let c = 0; c < numChannels; c++) {
+      const sample = Math.max(-1, Math.min(1, channels[c][i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+
+  return out;
+}
+
 function tailPadMs(trust: DurationTrust): number {
   return trust === "estimate" ? TAIL_PAD_ESTIMATE_MS : TAIL_PAD_TRUSTED_MS;
 }
@@ -486,13 +531,22 @@ export class MobileAudioPlayer {
         const segGap = Math.max(0, segments[s].gapAfterMs ?? 0);
         for (let i = 0; i < parts.length; i++) {
           const part = parts[i];
+          // Use the silence-trimmed decode when we have one — the native
+          // AVAudioPlayer queue otherwise plays the raw untrimmed clip,
+          // so every paragraph join carries its encoder lead/tail silence
+          // instead of the near-gapless join the Web Audio path already
+          // produces. That's what made native playback feel like
+          // "clip + dead air + clip" instead of continuous speech.
           const buffer =
-            part.kind === "decoded" ? part.raw : part.buffer;
+            part.kind === "decoded"
+              ? audioBufferToWav(part.audioBuffer)
+              : part.buffer;
+          const mimeType = part.kind === "decoded" ? "audio/wav" : part.mimeType || "audio/mpeg";
           // Gap only after the last part of a paragraph segment
           const isLastPart = i === parts.length - 1;
           clips.push({
             buffer,
-            mimeType: part.mimeType || "audio/mpeg",
+            mimeType,
             id: `s${s}-${i}-${gen}`,
             gapAfterMs: isLastPart ? segGap : 0,
           });
