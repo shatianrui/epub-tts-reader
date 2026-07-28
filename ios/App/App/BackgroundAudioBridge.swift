@@ -310,46 +310,44 @@ final class BackgroundAudioBridge: NSObject, WKScriptMessageHandler, AVAudioPlay
         commandCenter = MPRemoteCommandCenter.shared()
 
         // Play
-        commandCenter?.playCommand.removeTarget(nil)
-        commandCenter?.playCommand.addTarget { [weak self] _ in
+        let cc = MPRemoteCommandCenter.shared()
+        commandCenter = cc
+
+        cc.playCommand.removeTarget(nil)
+        cc.playCommand.addTarget { [weak self] _ in
             self?.resumePlayback()
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
 
-        // Pause
-        commandCenter?.pauseCommand.removeTarget(nil)
-        commandCenter?.pauseCommand.addTarget { [weak self] _ in
+        cc.pauseCommand.removeTarget(nil)
+        cc.pauseCommand.addTarget { [weak self] _ in
             self?.pausePlayback()
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
 
-        // Toggle play/pause
-        commandCenter?.togglePlayPauseCommand.removeTarget(nil)
-        commandCenter?.togglePlayPauseCommand.addTarget { [weak self] _ in
+        cc.togglePlayPauseCommand.removeTarget(nil)
+        cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             if let p = self?.player, p.isPlaying {
                 self?.pausePlayback()
             } else {
                 self?.resumePlayback()
             }
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
 
-        // Next track = skip current clip
-        commandCenter?.nextTrackCommand.removeTarget(nil)
-        commandCenter?.nextTrackCommand.addTarget { [weak self] _ in
+        cc.nextTrackCommand.removeTarget(nil)
+        cc.nextTrackCommand.addTarget { [weak self] _ in
             self?.skipToNext()
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
 
-        // Previous track = restart current or go back if possible
-        commandCenter?.previousTrackCommand.removeTarget(nil)
-        commandCenter?.previousTrackCommand.addTarget { [weak self] _ in
+        cc.previousTrackCommand.removeTarget(nil)
+        cc.previousTrackCommand.addTarget { [weak self] _ in
             self?.skipToPrevious()
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
 
-        // Disable seek for now (TTS clips)
-        commandCenter?.changePlaybackPositionCommand.isEnabled = false
+        cc.changePlaybackPositionCommand.isEnabled = false
     }
 
     private func skipToNext() {
