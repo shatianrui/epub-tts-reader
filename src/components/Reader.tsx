@@ -14,6 +14,7 @@ import {
   type PreparedAudio,
   type TimelineSegment,
 } from "@/lib/audioPlayer";
+import { isNativeIosAudio } from "@/lib/backgroundAudio";
 
 interface ReaderProps {
   book: StoredBook;
@@ -46,10 +47,10 @@ function advancePos(
 }
 
 /** Prefetch depth — higher so background batches are already synthesized. */
-const PREFETCH_AHEAD = 6;
+const PREFETCH_AHEAD = 15;
 /** Paragraphs scheduled onto the audio clock in one shot (iOS background). */
-const PLAY_BATCH_FOREGROUND = 3;
-const PLAY_BATCH_BACKGROUND = 6;
+const PLAY_BATCH_FOREGROUND = 5;
+const PLAY_BATCH_BACKGROUND = 15;
 
 export function Reader({
   book,
@@ -207,11 +208,14 @@ export function Reader({
           return;
         }
 
+        const isIosNative = isNativeIosAudio();
         const batchSize =
-          typeof document !== "undefined" &&
-          document.visibilityState === "hidden"
+          isIosNative
             ? PLAY_BATCH_BACKGROUND
-            : PLAY_BATCH_FOREGROUND;
+            : (typeof document !== "undefined" &&
+               document.visibilityState === "hidden"
+                ? PLAY_BATCH_BACKGROUND
+                : PLAY_BATCH_FOREGROUND);
 
         // Build a multi-paragraph window and schedule it on the audio clock
         // in one shot — survives iOS background JS throttling.
