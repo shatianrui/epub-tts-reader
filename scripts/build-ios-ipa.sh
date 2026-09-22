@@ -16,7 +16,7 @@ fail() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "IPA builds require macOS with Xcode; current OS is $(uname -s)"
-for cmd in xcodebuild codesign ditto unzip /usr/libexec/PlistBuddy; do
+for cmd in xcodebuild codesign ditto unzip zip python3 /usr/libexec/PlistBuddy; do
   command -v "${cmd}" >/dev/null 2>&1 || fail "missing required tool: ${cmd}"
 done
 [[ -d "${PROJECT}" ]] || fail "Xcode project not found: ${PROJECT}"
@@ -84,7 +84,11 @@ IPA_PATH="${DIST_DIR}/${IPA_NAME}"
 rm -f "${IPA_PATH}"
 (
   cd "${STAGE_DIR}"
-  /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_PATH}"
+  # ditto -c -k writes streaming zips (general-purpose bit 3, sizes only in
+  # the data descriptor) plus macOS extra fields. Windows Explorer and some
+  # sideload tools then report the archive as corrupt. Info-ZIP stores sizes
+  # in the local header; -X drops those extra fields; -y keeps symlinks.
+  zip -r -X -y "${IPA_PATH}" Payload
 )
 
 [[ -s "${IPA_PATH}" ]] || fail "IPA was not created: ${IPA_PATH}"
@@ -95,6 +99,23 @@ fi
 FILE_OUT="$(file -b "${IPA_PATH}")"
 echo "file(1): ${FILE_OUT}"
 echo "${FILE_OUT}" | grep -Ei 'iOS App Zip|Zip archive' >/dev/null || fail "unexpected IPA file type: ${FILE_OUT}"
+
+export IPA_PATH
+python3 - <<'PY'
+import os, sys, zipfile
+path = os.environ["IPA_PATH"]
+with zipfile.ZipFile(path) as zf:
+    flagged = [info.filename for info in zf.infolist() if info.flag_bits & 0x8]
+    missing = [name for name in ("Payload/",) if name not in zf.namelist()]
+if flagged:
+    sys.stderr.write(
+        "IPA zip uses data descriptors (%d entries); Windows cannot open it\n" % len(flagged)
+    )
+    sys.exit(1)
+if missing:
+    sys.stderr.write("IPA zip missing %s\n" % ", ".join(missing))
+    sys.exit(1)
+PY
 
 mkdir -p "${VERIFY_DIR}"
 unzip -q "${IPA_PATH}" -d "${VERIFY_DIR}"
