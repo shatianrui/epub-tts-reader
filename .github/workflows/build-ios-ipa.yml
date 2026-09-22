@@ -29,10 +29,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -53,16 +53,17 @@ jobs:
       - name: Build and package IPA
         run: bash scripts/build-ios-ipa.sh
 
-      # IMPORTANT: artifact *name* must NOT end in .ipa — Actions always wraps
-      # downloads in an outer .zip. Naming the artifact "Foo.ipa" makes browsers
-      # save the outer zip as Foo.ipa, which is NOT a valid IPA.
+      # archive: false uploads the IPA bytes directly. The default artifact
+      # zip is a second archive around an already-zipped IPA; Windows Explorer
+      # reports that download as a corrupt compressed file, and an expired
+      # artifact download is an error page saved as .zip.
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ListenPage-iOS
           path: ios/App/build/dist/ListenPage.ipa
+          archive: false
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
       # Direct .ipa download (no outer zip): Release asset
       - name: Publish IPA release asset
@@ -76,8 +77,9 @@ jobs:
           **Install:** Sideloadly / AltStore / TrollStore (re-sign with your Apple ID).
           Or open \`ios/App\` in Xcode → Run on a device.
 
-          **Do not** use the Actions artifact zip as if it were the IPA — download
-          \`ListenPage.ipa\` from this release instead."
+          Download \`ListenPage.ipa\` from this release or from the Actions artifact
+          (same file, not wrapped in another zip). Open it with Sideloadly / AltStore,
+          not by double-clicking on Windows."
 
           gh release delete "${TAG}" --yes --cleanup-tag 2>/dev/null || true
           gh release create "${TAG}" \

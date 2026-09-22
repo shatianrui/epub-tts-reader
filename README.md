@@ -130,9 +130,9 @@ npm run cap:open:ios   # 或手动打开 ios/App/App.xcodeproj（SPM 工程，�
 
 用不到 Xcode 也能装到自己手机上，思路是让 CI 出一个 **ad-hoc 签名**的 IPA，再用第三方工具在你自己的电脑（Windows/Mac 均可）上用免费 Apple ID 重新签名安装：
 
-1. 仓库里的 [Build iOS IPA](.github/workflows/build-ios-ipa.yml) 工作流会在 push 到 `main` 时自动跑（或在 Actions 页手动 **Run workflow**），产出 Artifact `ListenPage-iOS`，并滚动更新 Release `ios-latest` 里的直链资产 `ListenPage.ipa`。
-2. 优先下载 Release 里的 `ListenPage.ipa`；如果下载 Actions Artifact，注意外层还会被 GitHub 再包一层 zip，需要取出里面的 `ListenPage.ipa`。
-3. 用 [Sideloadly](https://sideloadly.io/)（或 AltStore）+ 你的免费 Apple ID，把这个 IPA 重新签名并通过 USB 安装到 iPhone。
+1. 仓库里的 [Build iOS IPA](.github/workflows/build-ios-ipa.yml) 工作流会在 push 到 `main` 时自动跑（或在 Actions 页手动 **Run workflow**），并滚动更新 Release `ios-latest` 里的 `ListenPage.ipa`。Actions Artifact 也是同一个 IPA，不再套一层 zip。
+2. 下载 `ListenPage.ipa` 后用 [Sideloadly](https://sideloadly.io/) 打开。不要在资源管理器里双击：Windows 没有 IPA 关联，会提示无法打开。若只是想查看内容，把副本改名为 `.zip` 再解压。
+3. 用 Sideloadly（或 AltStore）+ 你的免费 Apple ID，把这个 IPA 重新签名并通过 USB 安装到 iPhone。
 4. 同样受限于免费签名 7 天过期，Sideloadly 支持定期重新签名刷新。
 
 ### 正式签名 / 上架 App Store
