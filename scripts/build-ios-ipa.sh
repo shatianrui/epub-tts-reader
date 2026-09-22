@@ -16,7 +16,7 @@ fail() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "IPA builds require macOS with Xcode; current OS is $(uname -s)"
-for cmd in xcodebuild codesign ditto unzip /usr/libexec/PlistBuddy; do
+for cmd in xcodebuild codesign ditto zip unzip /usr/libexec/PlistBuddy; do
   command -v "${cmd}" >/dev/null 2>&1 || fail "missing required tool: ${cmd}"
 done
 [[ -d "${PROJECT}" ]] || fail "Xcode project not found: ${PROJECT}"
@@ -82,9 +82,15 @@ fi
 
 IPA_PATH="${DIST_DIR}/${IPA_NAME}"
 rm -f "${IPA_PATH}"
+# NOTE: use the standard Info-ZIP `zip` here, not `ditto -c -k --sequesterRsrc`.
+# ditto's zip output has a known bug where the "extra field" length recorded in
+# the central directory doesn't match the local file header for some entries.
+# Lenient parsers (macOS unzip/Archive Utility) tolerate this, but strict zip
+# parsers used by sideloading tools (Sideloadly, AltStore, .NET/Go zip libs on
+# Windows) reject the archive as invalid/corrupt — i.e. the IPA "无法打开".
 (
   cd "${STAGE_DIR}"
-  /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_PATH}"
+  zip -qry "${IPA_PATH}" Payload
 )
 
 [[ -s "${IPA_PATH}" ]] || fail "IPA was not created: ${IPA_PATH}"
